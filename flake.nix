@@ -22,6 +22,7 @@
           pkgs.gdb
           pkgs.valgrind
           pkgs.bear
+          pkgs.util-linux      # wipefs for clearing USB partition tables
         ];
 
         shellHook = ''
