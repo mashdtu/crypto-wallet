@@ -2,18 +2,31 @@
 
 CC     := gcc
 CFLAGS := -Wall -Wextra -std=c11 \
-          $(shell pkg-config --cflags openssl)
-LDFLAGS := $(shell pkg-config --libs openssl)
+          $(shell pkg-config --cflags openssl libsecp256k1)
+LDFLAGS := $(shell pkg-config --libs openssl libsecp256k1)
 
-.PHONY: all compile_commands clean
+SRCS := src/main.c src/keygen.c src/wallet.c src/storage.c src/bech32.c
 
-all: keygen
+.PHONY: all compile run test compile_commands clean
 
-keygen: src/keygen.c
-	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+all: wallet
+
+compile: wallet
+
+run: wallet
+	./wallet
+
+wallet: $(SRCS) src/keygen.h src/wallet.h src/storage.h src/bech32.h
+	$(CC) $(CFLAGS) $(SRCS) -o $@ $(LDFLAGS)
+
+test: tests/test_vector
+	./tests/test_vector
+
+tests/test_vector: tests/test_vector.c src/bech32.c src/bech32.h
+	$(CC) $(CFLAGS) -Isrc tests/test_vector.c src/bech32.c -o tests/test_vector $(LDFLAGS)
 
 compile_commands:
-	bear -- $(MAKE) all
+	bear -- $(MAKE) all test
 
 clean:
-	rm -f keygen
+	rm -f wallet keygen tests/test_vector

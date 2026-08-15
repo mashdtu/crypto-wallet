@@ -1,0 +1,9 @@
+wallet
+keygen
+tests/test_vector
+compile_commands.json
+seed.enc
+*.enc
+.vscode/
+.direnv/
+result
