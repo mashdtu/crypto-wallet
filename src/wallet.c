@@ -99,9 +99,9 @@ int wallet_derive_address(const unsigned char *seed,
     memcpy(k,  out,      32);
     memcpy(cc, out + 32, 32);
 
-    /* Derive m/84'/1'/0'/0/<index> */
+    /* Derive m/84'/0'/0'/0/<index> */
     if (derive_hardened_child(k, cc, 84u | 0x80000000u, k, cc) != 0) return -1;
-    if (derive_hardened_child(k, cc,  1u | 0x80000000u, k, cc) != 0) return -1;
+    if (derive_hardened_child(k, cc,  0u | 0x80000000u, k, cc) != 0) return -1;
     if (derive_hardened_child(k, cc,  0u | 0x80000000u, k, cc) != 0) return -1;
     if (derive_normal_child(k, cc, 0u,    k, cc) != 0) return -1;
     if (derive_normal_child(k, cc, index, k, cc) != 0) return -1;
@@ -125,7 +125,7 @@ int wallet_derive_address(const unsigned char *seed,
     RIPEMD160(sha_out, 32, h160);
 
     /* Bech32 */
-    if (segwit_addr_encode(address_out, "tb", 0, h160, 20) != 1)
+    if (segwit_addr_encode(address_out, "bc", 0, h160, 20) != 1)
         return -1;
 
     return 0;
@@ -149,7 +149,7 @@ int wallet_derive_key(const unsigned char *seed,
     memcpy(cc, out + 32, 32);
 
     if (derive_hardened_child(k, cc, 84u | 0x80000000u, k, cc) != 0) return -1;
-    if (derive_hardened_child(k, cc,  1u | 0x80000000u, k, cc) != 0) return -1;
+    if (derive_hardened_child(k, cc,  0u | 0x80000000u, k, cc) != 0) return -1;
     if (derive_hardened_child(k, cc,  0u | 0x80000000u, k, cc) != 0) return -1;
     if (derive_normal_child(k, cc, 0u,    k, cc) != 0) return -1;
     if (derive_normal_child(k, cc, index, k, cc) != 0) return -1;

@@ -430,7 +430,7 @@ static int cmd_send(const char *dest_addr, const char *amount_str, const char *f
 
     /* Encode our address from hash160 */
     char our_address[73];
-    if (segwit_addr_encode(our_address, "tb", 0, our_hash160, 20) != 1) {
+    if (segwit_addr_encode(our_address, "bc", 0, our_hash160, 20) != 1) {
         fprintf(stderr, "error: address encoding failed\n");
         memset(seed, 0, sizeof(seed));
         memset(privkey, 0, 32);
@@ -574,7 +574,7 @@ static int cmd_send(const char *dest_addr, const char *amount_str, const char *f
     }
     printf("\rBroadcasting [COMPLETE]\n");
     printf("txid: %s\n", txid);
-    printf("https://mempool.space/testnet4/tx/%s\n", txid);
+    printf("https://mempool.space/tx/%s\n", txid);
     return 0;
 }
 
@@ -722,16 +722,16 @@ static void usage(const char *prog)
 {
     fprintf(stderr,
             "Usage:\n"
-            "  %s [--file <path>] init               generate a new wallet\n"
-            "  %s [--file <path>] restore            restore a wallet from a mnemonic\n"
-            "  %s [--file <path>] address <index>    show receive address at index\n"
-            "  %s [--file <path>] balance [gap]      show total balance (scans addresses)\n"
-            "  %s [--file <path>] history [gap]      show transaction history\n"
-            "  %s [--file <path>] send <addr> <sat> [fee_sat]  send funds\n"
-            "  %s [--file <path>] check <address>              check if address is yours\n"
-            "  %s usb-format                         wipe a USB drive for use as a wallet key\n"
-            "  %s eject                              safely eject the wallet USB\n"
-            "  %s settings                           configure display currency\n"
+            "  %s [--file <path>] init                          generate a new wallet\n"
+            "  %s [--file <path>] restore                       restore a wallet from a mnemonic\n"
+            "  %s [--file <path>] address <index>               show receive address at index\n"
+            "  %s [--file <path>] balance [gap]                 show total balance (scans addresses)\n"
+            "  %s [--file <path>] history [gap]                 show transaction history\n"
+            "  %s [--file <path>] send <addr> <sat> [fee_sat]   send funds\n"
+            "  %s [--file <path>] check <address>               check if address is yours\n"
+            "  %s usb-format                                    wipe a USB drive for use as a wallet key\n"
+            "  %s eject                                         safely eject the wallet USB\n"
+            "  %s settings                                      configure display currency\n"
             "\n"
             "  --file <path>  use a specific raw device or file instead of auto-detected USB\n",
             prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
@@ -775,6 +775,7 @@ static int cmd_history(uint32_t gap_limit)
     printf("Scanning addresses...\n");
     fflush(stdout);
 
+    int64_t cur_bal = 0;
     while (gap < gap_limit) {
         char address[73];
         if (wallet_derive_address(seed, index, address) != 0) break;
@@ -788,8 +789,11 @@ static int cmd_history(uint32_t gap_limit)
         if (n == 0) { gap++; index++; continue; }
         gap = 0;
 
+        /* Add this address's balance to total */
+        int64_t ab = network_get_balance(address);
+        if (ab > 0) cur_bal += ab;
+
         for (int i = 0; i < n && total < MAX_HISTORY_TXS; i++) {
-            /* Merge duplicate txids (same tx touches multiple of our addresses) */
             int found = 0;
             for (int j = 0; j < total; j++) {
                 if (strcmp(all[j].txid, page[i].txid) == 0) {
@@ -823,7 +827,34 @@ static int cmd_history(uint32_t gap_limit)
         return 0;
     }
 
+    /* Compute balance after each tx (sorted newest first, so oldest is last).
+     * Walk oldest→newest (reverse), starting from current balance. */
+    int64_t *bal_after = malloc((size_t)total * sizeof(int64_t));
+    if (!bal_after) { free(all); return 1; }
+
+    int64_t running = cur_bal;
+    int running_valid = 1; /* becomes 0 once we go negative (missing history) */
+    for (int i = 0; i < total; i++) {
+        bal_after[i] = running_valid ? running : INT64_MIN;
+        running -= all[i].net_value;
+        if (running < 0) running_valid = 0;
+    }
+
     printf("\n");
+    if (have_price) {
+        printf("  %-16s  %-19s  %-46s  %-46s\n",
+               "date", "txid", "amount", "balance");
+        printf("  %-16s  %-19s  %-46s  %-46s\n",
+               "----------------", "-------------------",
+               "----------------------------------------------",
+               "----------------------------------------------");
+    } else {
+        printf("  %-16s  %-19s  %-20s  %-20s\n",
+               "date", "txid", "amount", "balance");
+        printf("  %-16s  %-19s  %-20s  %-20s\n",
+               "----------------", "-------------------",
+               "--------------------", "--------------------");
+    }
     for (int i = 0; i < total; i++) {
         addr_tx_t *tx = &all[i];
 
@@ -847,24 +878,41 @@ static int cmd_history(uint32_t gap_limit)
         uint64_t abs_val = tx->net_value >= 0
                            ? (uint64_t)tx->net_value
                            : (uint64_t)(-tx->net_value);
-        char s_val[32];
+        char s_val[32], s_bal[32];
         fmt_sat(abs_val, s_val, sizeof(s_val));
+        int bal_known = (bal_after[i] != INT64_MIN);
+        if (bal_known)
+            fmt_sat((uint64_t)bal_after[i], s_bal, sizeof(s_bal));
+        else
+            snprintf(s_bal, sizeof(s_bal), "---");
 
         /* Optional fiat */
-        char fiat_str[48] = "";
+        char fiat_val[48] = "", fiat_bal[48] = "";
         if (have_price) {
-            char f_val[32];
-            fmt_fiat((double)abs_val / 1e8 * btc_price, currency, f_val, sizeof(f_val));
-            snprintf(fiat_str, sizeof(fiat_str), " (~%s)", f_val);
+            char f_v[32];
+            fmt_fiat((double)abs_val / 1e8 * btc_price, currency, f_v, sizeof(f_v));
+            snprintf(fiat_val, sizeof(fiat_val), "  (~%s)", f_v);
+            if (bal_known) {
+                char f_b[32];
+                fmt_fiat((double)bal_after[i] / 1e8 * btc_price, currency, f_b, sizeof(f_b));
+                snprintf(fiat_bal, sizeof(fiat_bal), "  (~%s)", f_b);
+            }
         }
 
-        printf("  %s  %s  %c%s sat%s  [%s]\n",
-               date_str, short_txid,
-               sign, s_val, fiat_str,
-               tx->confirmed ? "confirmed" : "unconfirmed");
+        /* Build combined amount and balance columns with aligned fiat */
+        char amt_col[72], bal_col[72];
+        char amt_sat[32], bal_sat[32];
+        snprintf(amt_sat, sizeof(amt_sat), "%c%s sat", sign, s_val);
+        snprintf(bal_sat, sizeof(bal_sat), "%s sat", s_bal);
+        snprintf(amt_col, sizeof(amt_col), " %-16s%s", amt_sat, fiat_val);
+        snprintf(bal_col, sizeof(bal_col), " %-16s%s", bal_sat, fiat_bal);
+
+        printf("  %s  %s  %-46s  %s\n",
+               date_str, short_txid, amt_col, bal_col);
     }
     printf("\n%d transaction%s\n", total, total == 1 ? "" : "s");
 
+    free(bal_after);
     free(all);
     return 0;
 }

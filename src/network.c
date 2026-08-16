@@ -6,7 +6,7 @@
 #include <string.h>
 #include <curl/curl.h>
 
-#define API_BASE "https://mempool.space/testnet4/api"
+#define API_BASE "https://mempool.space/api"
 #define TIMEOUT_SECS 10L
 
 /* Growing buffer for curl response */
@@ -252,63 +252,60 @@ int network_get_address_txs(const char *address, addr_tx_t *txs, int max_txs)
     const char *p = resp.data;
 
     while (count < max_txs) {
+        /* Top-level tx objects always have txid immediately followed by version */
         const char *txid_key = strstr(p, "\"txid\":\"");
         if (!txid_key) break;
 
-        /* Extract txid value */
-        const char *txid_val = txid_key + 8;
+        const char *txid_val = txid_key + 8; /* skip "txid":" */
+
+        /* Extract 64-char txid */
         char txid[65] = {0};
         int i = 0;
-        while (txid_val[i] && txid_val[i] != '"' && i < 64)
-            txid[i] = txid_val[i++];
+        while (txid_val[i] && txid_val[i] != '"' && i < 64) {
+            txid[i] = txid_val[i];
+            i++;
+        }
+        if (i != 64) { p = txid_key + 1; continue; }
 
-        /* Distinguish top-level tx txid from vin txid:
-         * tx-level: followed by "version":N
-         * vin-level: followed by "vout":N  */
-        const char *after = txid_val + i + 1;
-        while (*after == ' ' || *after == '\t' || *after == '\r' ||
-               *after == '\n' || *after == ',') after++;
-        if (strncmp(after, "\"version\":", 10) != 0) {
-            p = txid_key + 8;
+        /* Immediately after the closing " must come ,"version": */
+        const char *after = txid_val + 64 + 1; /* skip closing " */
+        if (*after != ',' || strncmp(after + 1, "\"version\":", 10) != 0) {
+            p = txid_key + 1;
             continue;
         }
 
-        /* Find tx object start */
+        /* Find the opening { of this tx object (just before "txid") */
         const char *tx_start = txid_key;
         while (tx_start > resp.data && *tx_start != '{') tx_start--;
 
-        /* Find status block and derive tx_end */
+        /* Find "status":{ and walk to its closing } to find tx end */
         const char *status_p = strstr(txid_key, "\"status\":{");
+        if (!status_p) { p = txid_key + 1; continue; }
+
+        const char *sp = status_p + 9; /* points to { */
+        int depth = 1;
+        while (*sp && depth > 0) {
+            if      (*sp == '{') depth++;
+            else if (*sp == '}') depth--;
+            sp++;
+        }
+        /* sp now points one past closing } of status.
+         * Since status is the last field, that } also closes the tx object. */
+        const char *tx_end = sp; /* sp is already past the tx's closing } */
+        if (!tx_end || tx_end <= tx_start) { p = txid_key + 1; continue; }
+
+        /* Parse confirmed + block_time from status block */
         int confirmed = 0;
         uint32_t block_time = 0;
-        const char *tx_end = NULL;
-
-        if (status_p) {
-            const char *conf = strstr(status_p, "\"confirmed\":");
-            if (conf) {
-                const char *cv = conf + 12;
-                while (*cv == ' ') cv++;
-                confirmed = (strncmp(cv, "true", 4) == 0);
-            }
-            if (confirmed) {
-                int64_t bt = json_get_int(status_p, "block_time");
-                if (bt > 0) block_time = (uint32_t)bt;
-            }
-            /* Walk depth to find closing } of status, then closing } of tx */
-            const char *sp = status_p + 9;
-            int depth = 1;
-            while (*sp && depth > 0) {
-                if (*sp == '{') depth++;
-                else if (*sp == '}') depth--;
-                sp++;
-            }
-            while (*sp == ' ' || *sp == '\n' || *sp == '\t' || *sp == '\r') sp++;
-            if (*sp == '}') tx_end = sp + 1;
+        const char *conf_p = strstr(status_p, "\"confirmed\":");
+        if (conf_p && conf_p < tx_end) {
+            const char *cv = conf_p + 12;
+            while (*cv == ' ') cv++;
+            confirmed = (strncmp(cv, "true", 4) == 0);
         }
-
-        if (!tx_end) {
-            p = txid_key + 8;
-            continue;
+        if (confirmed) {
+            int64_t bt = json_get_int(status_p, "block_time");
+            if (bt > 0) block_time = (uint32_t)bt;
         }
 
         txs[count].net_value  = tx_net_for_addr(tx_start, tx_end, address);
