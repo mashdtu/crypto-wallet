@@ -7,7 +7,7 @@ LDFLAGS := $(shell pkg-config --libs openssl libsecp256k1 libcurl)
 
 SRCS := src/main.c src/keygen.c src/wallet.c src/storage.c src/network.c src/tx.c src/bech32.c
 
-.PHONY: all compile run test compile_commands clean install uninstall
+.PHONY: all compile run test compile_commands clean install uninstall crack
 
 all: wallet
 
@@ -19,6 +19,9 @@ run: wallet
 wallet: $(SRCS) src/keygen.h src/wallet.h src/storage.h src/network.h src/tx.h src/bech32.h
 	$(CC) $(CFLAGS) $(SRCS) -o $@ $(LDFLAGS)
 
+crack: tools/crack.c
+	$(CC) -O2 -Wall -pthread $(shell pkg-config --cflags openssl) tools/crack.c -o tools/crack $(shell pkg-config --libs openssl)
+
 test: tests/test_vector
 	./tests/test_vector
 
@@ -29,7 +32,7 @@ compile_commands:
 	bear -- $(MAKE) all test
 
 clean:
-	rm -f wallet keygen tests/test_vector
+	rm -f wallet keygen tests/test_vector tools/crack
 
 INSTALL_DIR := $(HOME)/.local/bin
 
