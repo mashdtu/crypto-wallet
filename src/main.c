@@ -7,6 +7,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <errno.h>
 
 #include "keygen.h"
 #include "wallet.h"
@@ -718,6 +719,88 @@ static int cmd_restore(void)
     return 0;
 }
 
+#define SEED_ENC_SIZE 124  /* 32 salt + 12 IV + 64 ciphertext + 16 tag */
+
+static int cmd_clone(void)
+{
+    char src_dev[512];
+    if (!find_usb_device(src_dev, sizeof(src_dev))) {
+        fprintf(stderr, "error: no USB drive found\n");
+        return 1;
+    }
+
+    /* Read encrypted seed from source USB */
+    unsigned char enc[SEED_ENC_SIZE];
+    FILE *f = fopen(src_dev, "rb");
+    if (!f) {
+        fprintf(stderr, "error: cannot open %s: %s\n", src_dev, strerror(errno));
+        return 1;
+    }
+    if (fread(enc, 1, SEED_ENC_SIZE, f) != SEED_ENC_SIZE) {
+        fprintf(stderr, "error: read failed from %s\n", src_dev);
+        fclose(f);
+        return 1;
+    }
+    fclose(f);
+    printf("Read encrypted seed from %s\n", src_dev);
+
+    /* Step 1: wait for the source USB to be removed */
+    printf("Remove the USB drive now...\n");
+    fflush(stdout);
+    for (;;) {
+        sleep(1);
+        char tmp[512];
+        int present = find_usb_device(tmp, sizeof(tmp)) && strcmp(tmp, src_dev) == 0;
+        if (!present)
+            break;
+    }
+    printf("USB removed.\n");
+
+    /* Step 2: wait for the target USB to be inserted */
+    printf("Insert the target USB now...\n");
+    fflush(stdout);
+    char dst_dev[512];
+    int found = 0;
+    for (int attempts = 0; attempts < 60; attempts++) {
+        sleep(1);
+        if (find_usb_device(dst_dev, sizeof(dst_dev))) {
+            found = 1;
+            break;
+        }
+    }
+    if (!found) {
+        fprintf(stderr, "error: no USB drive detected after 60 seconds\n");
+        return 1;
+    }
+    printf("Detected target USB: %s\n", dst_dev);
+
+    printf("WARNING: this will overwrite the first %d bytes of %s.\n", SEED_ENC_SIZE, dst_dev);
+    printf("Type YES to continue: ");
+    fflush(stdout);
+    char ans[8];
+    if (!fgets(ans, sizeof(ans), stdin) || strcmp(ans, "YES\n") != 0) {
+        printf("Aborted.\n");
+        return 1;
+    }
+
+    FILE *g = fopen(dst_dev, "wb");
+    if (!g) {
+        fprintf(stderr, "error: cannot open %s: %s\n", dst_dev, strerror(errno));
+        return 1;
+    }
+    if (fwrite(enc, 1, SEED_ENC_SIZE, g) != SEED_ENC_SIZE) {
+        fprintf(stderr, "error: write failed to %s\n", dst_dev);
+        fclose(g);
+        return 1;
+    }
+    fflush(g);
+    fclose(g);
+    sync();
+
+    printf("Written to %s. Clone complete.\n", dst_dev);
+    return 0;
+}
+
 static void usage(const char *prog)
 {
     fprintf(stderr,
@@ -729,12 +812,13 @@ static void usage(const char *prog)
             "  %s [--file <path>] history [gap]                 show transaction history\n"
             "  %s [--file <path>] send <addr> <sat> [fee_sat]   send funds\n"
             "  %s [--file <path>] check <address>               check if address is yours\n"
+            "  %s usb-clone                                     clone encrypted seed to a second USB\n"
             "  %s usb-format                                    wipe a USB drive for use as a wallet key\n"
             "  %s eject                                         safely eject the wallet USB\n"
             "  %s settings                                      configure display currency\n"
             "\n"
             "  --file <path>  use a specific raw device or file instead of auto-detected USB\n",
-            prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
+            prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
 }
 
 #define MAX_HISTORY_TXS 512
@@ -1054,9 +1138,13 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    /* usb-format operates on unmounted block devices -- no seed path needed */
+    /* usb-format and usb-clone operate on raw block devices -- no seed path needed */
     if (strcmp(argv[argi], "usb-format") == 0) {
         return cmd_usb_format();
+    }
+
+    if (strcmp(argv[argi], "usb-clone") == 0) {
+        return cmd_clone();
     }
 
     if (strcmp(argv[argi], "eject") == 0) {
