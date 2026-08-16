@@ -1,3 +1,26 @@
+/*
+ * main.c - command-line Bitcoin wallet
+ *
+ * This is the entry point and top-level command dispatcher. Each 'wallet'
+ * subcommand is a self-contained function (cmd_init, cmd_send, etc.) that
+ * handles its own prompting, network calls, and output.
+ *
+ * Security design:
+ *   - The 64-byte seed is decrypted into a stack buffer, used, then wiped
+ *     with memset() before returning. Private keys are treated the same way.
+ *   - Passwords are read with getpass() which disables terminal echo.
+ *   - The encrypted seed lives on a raw USB block device (no filesystem),
+ *     making it harder to accidentally copy or back up.
+ *   - No seed or private key is ever written to disk by this program.
+ *
+ * The wallet uses BIP-84 (native SegWit) with mainnet coin type:
+ *   path: m/84'/0'/0'/0/<index>
+ *   addresses: bc1q... (P2WPKH)
+ *
+ * Network calls go to mempool.space for UTXOs, balance, history, and broadcast.
+ * All requests use TLS with certificate verification.
+ */
+
 #define _DEFAULT_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,11 +36,23 @@
 #include "wallet.h"
 #include "storage.h"
 
+/* Global path to the seed file / block device.
+ * Set once at startup by init_seed_path() or --file override. */
 static char seed_path[512];
 
-/* Scan /sys/block for removable block devices.
- * Writes the first found device path (e.g. /dev/sda) into dev_out.
- * Returns 1 if found, 0 otherwise. */
+/*
+ * find_usb_device()
+ *
+ * Scans /sys/block for block devices where the 'removable' flag is 1.
+ * This is how Linux marks USB drives and SD cards, internal SATA/NVMe
+ * drives have removable=0.
+ *
+ * Returns the first removable device path (e.g. /dev/sdb) in dev_out.
+ * Returns 1 if found, 0 if no removable device is present.
+ *
+ * We use /sys/block rather than udev or blkid to avoid extra dependencies
+ * and because this level of simplicity is enough for our single-USB use case.
+ */
 static int find_usb_device(char *dev_out, size_t dev_size)
 {
     DIR *bd = opendir("/sys/block");
@@ -156,10 +191,23 @@ static int cmd_init(void)
 #include "tx.h"
 #include "bech32.h"
 
+/* How many consecutive empty addresses to see before stopping a balance/history scan.
+ * 20 is the BIP-44 standard gap limit. You can raise it with 'wallet balance 50'
+ * if you have a wallet with irregular usage patterns. */
 #define GAP_LIMIT 20
+
+/* Don't create change outputs below this threshold, they'd cost more to spend
+ * than they're worth. 546 sat is the standard P2WPKH dust limit. */
 #define DUST_LIMIT 546
 
-/* Format a uint64_t with comma separators into buf. Returns buf. */
+/*
+ * fmt_sat()
+ *
+ * Formats a satoshi amount with comma separators for readability.
+ * 100000000 -> "100,000,000"
+ * We roll this ourselves instead of using printf locale formatting because
+ * locale support is flaky under sudo and in minimal environments.
+ */
 static char *fmt_sat(uint64_t v, char *buf, size_t bufsz)
 {
     char tmp[32];
@@ -174,7 +222,13 @@ static char *fmt_sat(uint64_t v, char *buf, size_t bufsz)
     return buf;
 }
 
-/* Format a fiat amount with commas and 2 decimal places, e.g. "USD 1,234.56" */
+/*
+ * fmt_fiat()
+ *
+ * Formats a fiat amount as "USD 1,234.56" with comma-separated thousands.
+ * We convert to integer cents first to avoid floating-point rounding issues
+ * when displaying values like 9999.999999 which should show as 10,000.00.
+ */
 static char *fmt_fiat(double amount, const char *currency, char *buf, size_t bufsz)
 {
     long long cents = (long long)(amount * 100.0 + 0.5);
@@ -186,11 +240,19 @@ static char *fmt_fiat(double amount, const char *currency, char *buf, size_t buf
     return buf;
 }
 
-/* Settings: store currency preference in ~/.config/btc-wallet/currency */
+/*
+ * settings_path()
+ *
+ * Returns the path to the currency preference file.
+ * We store this in ~/.config/btc-wallet/currency as a single line of text.
+ *
+ * When running under sudo, $HOME is /root, which is wrong, the setting
+ * should belong to the real user. We use $SUDO_USER to find the correct home.
+ */
 static const char *settings_path(void)
 {
     static char path[512];
-    /* Under sudo, HOME is /root — use the real user's home instead */
+    /* Under sudo, HOME is /root, use the real user's home instead */
     const char *home = getenv("SUDO_USER") ? NULL : getenv("HOME");
     if (!home) {
         const char *sudo_user = getenv("SUDO_USER");
@@ -304,6 +366,15 @@ static int cmd_address(const char *index_str)
     return 0;
 }
 
+/*
+ * cmd_balance()
+ *
+ * Scans address indices 0, 1, 2, ... querying the network for each address.
+ * Stops after 'gap_limit' consecutive addresses with zero balance.
+ *
+ * Prints each non-zero address on its own line, and dots for empty ones.
+ * Shows total with fiat equivalent if a currency is configured.
+ */
 static int cmd_balance(uint32_t gap_limit)
 {
     if (access(DEFAULT_SEED_PATH, F_OK) != 0) {
@@ -382,6 +453,26 @@ static int cmd_balance(uint32_t gap_limit)
     return 0;
 }
 
+/*
+ * cmd_send()
+ *
+ * Builds, signs, and broadcasts a Bitcoin transaction.
+ *
+ * Currently uses only index 0 for spending (all UTXOs from that address).
+ * The destination can be any valid mainnet segwit address (P2WPKH or P2TR).
+ *
+ * Flow:
+ *   1. Decode destination address to get the witness program.
+ *   2. Decrypt seed, derive key at index 0.
+ *   3. Fetch UTXOs from mempool.space.
+ *   4. Check if destination is ours (to label it in the confirmation screen).
+ *   5. Show a confirmation summary with amounts and fiat values.
+ *   6. Build and sign the transaction (BIP-143 sighash + ECDSA).
+ *   7. Broadcast the signed hex to mempool.space.
+ *
+ * Change is returned to index 0 if > dust limit (546 sat).
+ * If change would be below dust, it's folded into the fee instead.
+ */
 static int cmd_send(const char *dest_addr, const char *amount_str, const char *fee_str)
 {
     uint64_t amount_sat = (uint64_t)strtoull(amount_str, NULL, 10);
@@ -582,6 +673,15 @@ static int cmd_send(const char *dest_addr, const char *amount_str, const char *f
 /* Returns the index if address belongs to this seed, -1 otherwise.
  * Scans up to max_index addresses. */
 
+/*
+ * cmd_check()
+ *
+ * Scans up to 10,000 address indices to see if the given address belongs
+ * to this wallet. Useful for verifying a receive address before sharing it,
+ * or checking an old address you're not sure about.
+ *
+ * 10,000 is generous, a typical wallet would only need to check a few hundred.
+ */
 static int cmd_check(const char *target)
 {
     if (access(DEFAULT_SEED_PATH, F_OK) != 0) {
@@ -620,6 +720,20 @@ static int cmd_check(const char *target)
     return 1;
 }
 
+/*
+ * cmd_restore()
+ *
+ * Restores a wallet from an existing 24-word BIP-39 mnemonic.
+ * This is used when:
+ *   - Setting up a new USB with an existing wallet
+ *   - Recovering after a lost or damaged USB drive
+ *   - Importing a wallet created by another BIP-84 compatible wallet
+ *
+ * Each word is validated against the BIP-39 wordlist as it's entered,
+ * so typos are caught immediately rather than at the end.
+ * After all 24 words are entered, shows the first address so you can
+ * verify it matches your expected wallet before setting a password.
+ */
 static int cmd_restore(void)
 {
     if (access(DEFAULT_SEED_PATH, F_OK) == 0) {
@@ -721,6 +835,23 @@ static int cmd_restore(void)
 
 #define SEED_ENC_SIZE 124  /* 32 salt + 12 IV + 64 ciphertext + 16 tag */
 
+/*
+ * cmd_clone()
+ *
+ * Copies the encrypted seed blob from the current USB to a second USB,
+ * creating an identical backup drive.
+ *
+ * The clone is safe to make without a password because we never decrypt
+ * anything, we just copy the raw 124-byte encrypted blob verbatim.
+ * An attacker who steals the backup USB still needs the password to use it.
+ *
+ * Flow:
+ *   1. Read 124 bytes from offset 0 of the source USB.
+ *   2. Prompt to remove the USB and poll /sys/block until it disappears.
+ *   3. Prompt to insert the target USB and poll until any USB appears.
+ *   4. Confirm before writing (destructive operation).
+ *   5. Write the same 124 bytes to offset 0 of the target USB.
+ */
 static int cmd_clone(void)
 {
     char src_dev[512];
@@ -835,6 +966,23 @@ static int compare_tx_time(const void *a, const void *b)
     return 0;
 }
 
+/*
+ * cmd_history()
+ *
+ * Fetches and displays transaction history across all addresses in the wallet.
+ *
+ * The mempool.space API returns ~25 transactions per address. For each
+ * address in the gap-limit scan, we merge results by txid to avoid showing
+ * the same transaction twice (a tx touching two of our addresses would
+ * otherwise appear twice).
+ *
+ * After collecting and deduplicating, transactions are sorted newest-first.
+ * A running balance is computed by walking oldest-to-newest from the current
+ * balance. If there are more transactions than the API returns (~25 per
+ * address), the running balance may go negative -- those rows show '---'
+ * for the balance column to indicate missing history rather than showing
+ * a wrong number.
+ */
 static int cmd_history(uint32_t gap_limit)
 {
     if (access(DEFAULT_SEED_PATH, F_OK) != 0) {
@@ -912,12 +1060,12 @@ static int cmd_history(uint32_t gap_limit)
     }
 
     /* Compute balance after each tx (sorted newest first, so oldest is last).
-     * Walk oldest→newest (reverse), starting from current balance. */
+     * Walk oldest->newest (reverse), starting from current balance. */
     int64_t *bal_after = malloc((size_t)total * sizeof(int64_t));
     if (!bal_after) { free(all); return 1; }
 
     int64_t running = cur_bal;
-    int running_valid = 1; /* becomes 0 once we go negative (missing history) */
+    int running_valid = 1;  /* becomes 0 once we go negative (missing history) */
     for (int i = 0; i < total; i++) {
         bal_after[i] = running_valid ? running : INT64_MIN;
         running -= all[i].net_value;
@@ -1001,6 +1149,13 @@ static int cmd_history(uint32_t gap_limit)
     return 0;
 }
 
+/*
+ * cmd_eject()
+ *
+ * Safely powers off the USB drive using udisks2's power-off command.
+ * This flushes kernel write buffers (sync) then tells the USB controller
+ * to cut power, so it's safe to physically unplug the drive.
+ */
 static int cmd_eject(void)
 {
     char dev[512];
@@ -1138,7 +1293,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    /* usb-format and usb-clone operate on raw block devices -- no seed path needed */
+    /* usb-format and usb-clone operate on raw block devices */
     if (strcmp(argv[argi], "usb-format") == 0) {
         return cmd_usb_format();
     }

@@ -7,7 +7,7 @@ LDFLAGS := $(shell pkg-config --libs openssl libsecp256k1 libcurl)
 
 SRCS := src/main.c src/keygen.c src/wallet.c src/storage.c src/network.c src/tx.c src/bech32.c
 
-.PHONY: all compile run test compile_commands clean
+.PHONY: all compile run test compile_commands clean install uninstall
 
 all: wallet
 
@@ -30,3 +30,18 @@ compile_commands:
 
 clean:
 	rm -f wallet keygen tests/test_vector
+
+INSTALL_DIR := $(HOME)/.local/bin
+
+install: wallet
+	@mkdir -p $(INSTALL_DIR)
+	@cp wallet $(INSTALL_DIR)/wallet
+	@echo "Installed to $(INSTALL_DIR)/wallet"
+	@if ! echo ":$$PATH:" | grep -q ":$(INSTALL_DIR):"; then \
+		echo "NOTE: add this to your shell config if not already present:"; \
+		echo "  export PATH=\"\$$HOME/.local/bin:\$$PATH\""; \
+	fi
+
+uninstall:
+	@rm -f $(INSTALL_DIR)/wallet
+	@echo "Removed $(INSTALL_DIR)/wallet"

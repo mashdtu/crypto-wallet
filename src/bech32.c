@@ -1,8 +1,26 @@
 /*
- * src/bech32.c — bech32 encoding for native SegWit addresses (BIP-173)
+ * bech32.c - bech32 and bech32m address encoding/decoding (BIP-173 / BIP-350)
  *
- * Based on the reference implementation in BIP-173.
- * https://github.com/bitcoin/bips/blob/master/bip-0173/ref/c/segwit_addr.c
+ * Bech32 is the encoding format used for native SegWit Bitcoin addresses.
+ * Addresses look like: bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4
+ *
+ * Format: <hrp> "1" <data> <checksum>
+ *   hrp        - human-readable part ("bc" for mainnet, "tb" for testnet)
+ *   "1"        - separator (always the character '1')
+ *   data       - witness version (1 char) + witness program (5-bit encoded)
+ *   checksum   - 6 characters providing error detection
+ *
+ * Two variants:
+ *   bech32  (BIP-173): used for witness version 0 (P2WPKH bc1q..., P2WSH)
+ *   bech32m (BIP-350): used for witness version 1+ (P2TR bc1p... taproot)
+ *
+ * The only difference between bech32 and bech32m is the checksum constant:
+ *   bech32  checksum XOR constant = 1
+ *   bech32m checksum XOR constant = 0x2bc830a3
+ *
+ * Using the wrong constant on an address from the other type causes
+ * checksum verification to fail, preventing accidentally sending to
+ * a taproot address using a P2WPKH-format checksum (or vice versa).
  */
 
 #include "bech32.h"
@@ -10,14 +28,20 @@
 #include <string.h>
 #include <stdint.h>
 
-/* The 32-character bech32 alphabet */
+/* The 32-character alphabet used for bech32 encoding.
+ * Chosen to avoid visually confusing characters (0/O, 1/I/l). */
 static const char CHARSET[] = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
 
-/* checksum */
-
 /*
- * Compute the bech32 checksum polynomial over an array of 5-bit values.
- * The generator constants come directly from BIP-173.
+ * bech32_polymod()
+ *
+ * Computes the BCH polynomial checksum over an array of 5-bit values.
+ * This is a BCH (Bose-Chaudhuri-Hocquenghem) error-detecting code that
+ * can detect up to 4 errors in an address string.
+ *
+ * The five generator constants come directly from BIP-173.
+ * If the checksum of a valid bech32 string equals 1 (or 0x2bc830a3 for
+ * bech32m), the data is valid.
  */
 static uint32_t bech32_polymod(const uint8_t *values, size_t len)
 {
@@ -36,30 +60,34 @@ static uint32_t bech32_polymod(const uint8_t *values, size_t len)
 }
 
 /*
- * Expand the human-readable part into a sequence of 5-bit values for the
- * checksum calculation.  For HRP "tb" this produces: [3, 2, 0, 20, 2].
+ * bech32_hrp_expand()
  *
- *   High bits of each char (>>5), then a zero separator, then low bits (&31).
+ * Expands the human-readable part into 5-bit values for use in the checksum.
+ * The expansion is: high bits of each char (>>5), a zero separator, then
+ * low bits (&31). This ensures different HRPs produce different checksums.
+ *
+ * For "bc": [3, 2, 0, 2, 3]
+ * For "tb": [3, 2, 0, 20, 2]
  */
 static size_t bech32_hrp_expand(const char *hrp, uint8_t *out)
 {
     size_t len = strlen(hrp);
-    for (size_t i = 0; i < len; i++) out[i]         = (uint8_t)((unsigned char)hrp[i] >> 5);
-    out[len] = 0;
+    for (size_t i = 0; i < len; i++) out[i]           = (uint8_t)((unsigned char)hrp[i] >> 5);
+    out[len] = 0;   /* zero separator */
     for (size_t i = 0; i < len; i++) out[len + 1 + i] = (uint8_t)((unsigned char)hrp[i] & 31u);
     return len * 2 + 1;
 }
 
-/* base conversion */
-
 /*
- * Convert between power-of-2 bit-group sizes.
- * Used to repack 8-bit bytes into 5-bit groups for bech32.
+ * convertbits()
  *
- * frombits / tobits: source and target group sizes (e.g. 8 and 5)
- * pad: if 1, pad the last group; if 0, require no leftover bits
+ * Converts an array of values from one bit-width to another.
+ * Used to repack 8-bit bytes into 5-bit groups for bech32 encoding,
+ * and to convert 5-bit groups back to 8-bit bytes for decoding.
  *
- * Returns 1 on success, 0 on failure.
+ * frombits:    source group size (e.g. 8 for bytes)
+ * tobits:      target group size (e.g. 5 for bech32)
+ * pad:         1 = pad with zeros at the end; 0 = require no leftover bits
  */
 static int convertbits(uint8_t *out, size_t *outlen,
                        const uint8_t *in, size_t inlen,
@@ -81,49 +109,47 @@ static int convertbits(uint8_t *out, size_t *outlen,
     if (pad) {
         if (bits) out[o++] = (uint8_t)((acc << (tobits - bits)) & maxv);
     } else if (bits >= frombits || ((acc << (tobits - bits)) & maxv)) {
-        return 0; /* leftover bits that shouldn't be there */
+        return 0;   /* leftover bits that shouldn't be there (reject) */
     }
     *outlen = o;
     return 1;
 }
 
-/* public API */
-
 int segwit_addr_encode(char *output, const char *hrp, int witver,
                        const unsigned char *witprog, size_t witprog_len)
 {
-    /* Convert witness program from 8-bit to 5-bit groups */
+    /* Step 1: convert the witness program from 8-bit bytes to 5-bit groups */
     uint8_t converted[65];
     size_t  converted_len = 0;
     if (!convertbits(converted, &converted_len,
                      witprog, witprog_len, 8, 5, 1))
         return 0;
 
-    /* data = [witness_version] + [5-bit converted program] */
+    /* Step 2: prepend the witness version as the first 5-bit value */
     uint8_t data[66];
     data[0] = (uint8_t)witver;
     memcpy(data + 1, converted, converted_len);
     size_t data_len = 1 + converted_len;
 
-    /* Build input for polymod: hrp_expand + data + 6 zero padding */
+    /* Step 3: compute the checksum over hrp_expand + data + 6 zeros */
     uint8_t polymod_input[200];
     size_t  hrp_len = bech32_hrp_expand(hrp, polymod_input);
     memcpy(polymod_input + hrp_len, data, data_len);
-    memset(polymod_input + hrp_len + data_len, 0, 6);
+    memset(polymod_input + hrp_len + data_len, 0, 6);   /* placeholder for checksum */
 
-    /* Bech32 for v0, bech32m for v1+ */
+    /* Use bech32 constant (1) for v0, bech32m constant (0x2bc830a3) for v1+ */
     uint32_t const_val = (witver == 0) ? 1u : 0x2bc830a3u;
     uint32_t chk = bech32_polymod(polymod_input, hrp_len + data_len + 6) ^ const_val;
 
-    /* Compute 6 checksum characters */
+    /* Step 4: encode the 6 checksum characters */
     uint8_t checksum[6];
     for (int i = 0; i < 6; i++)
         checksum[i] = (uint8_t)((chk >> (5 * (5 - i))) & 31u);
 
-    /* Write output: hrp + '1' + encoded data + encoded checksum */
+    /* Step 5: assemble the final string: hrp + "1" + encoded_data + checksum */
     size_t h = strlen(hrp);
     memcpy(output, hrp, h);
-    output[h] = '1';
+    output[h] = '1';    /* separator */
     for (size_t i = 0; i < data_len; i++)
         output[h + 1 + i] = CHARSET[data[i]];
     for (int i = 0; i < 6; i++)
@@ -138,19 +164,20 @@ int segwit_addr_decode(const char *addr,
                        unsigned char *prog_out,
                        size_t *prog_len)
 {
-    /* Find the last '1' separator */
+    /* Find the last '1'. Everything before it is the HRP */
     size_t addr_len = strlen(addr);
     int sep = -1;
     for (int i = (int)addr_len - 1; i >= 0; i--) {
         if (addr[i] == '1') { sep = i; break; }
     }
+    /* Require at least 1 HRP char and 6 checksum chars after the separator */
     if (sep < 1 || sep + 7 > (int)addr_len) return -1;
 
-    /* Copy HRP */
+    /* Extract the HRP */
     memcpy(hrp_out, addr, (size_t)sep);
     hrp_out[sep] = '\0';
 
-    /* Decode data characters from the charset */
+    /* Decode data portion from the charset */
     size_t data_len = addr_len - sep - 1;
     uint8_t data[128];
     if (data_len > 128) return -1;
@@ -160,22 +187,21 @@ int segwit_addr_decode(const char *addr,
         data[i] = (uint8_t)(pos - CHARSET);
     }
 
-    /* Witness version is the first 5-bit value — peek before checksum verify
-     * so we know which constant to use (bech32 vs bech32m) */
+    /* Peek the witness version (first 5-bit value) BEFORE verifying the checksum,
+     * so we know which constant to use for verification. */
     int witver = data[0];
     if (witver > 16) return -1;
 
-    /* Verify checksum:
-     * witness v0 uses bech32  (polymod == 1)
-     * witness v1+ uses bech32m (polymod == 0x2bc830a3) */
+    /* Verify the checksum (different constant for bech32 vs bech32m) */
     uint8_t polymod_input[256];
     size_t hrp_expand_len = bech32_hrp_expand(hrp_out, polymod_input);
     memcpy(polymod_input + hrp_expand_len, data, data_len);
     uint32_t chk = bech32_polymod(polymod_input, hrp_expand_len + data_len);
-    if (witver == 0 && chk != 1u)          return -1;
-    if (witver != 0 && chk != 0x2bc830a3u) return -1;
+    if (witver == 0 && chk != 1u)           return -1;  /* bech32 */
+    if (witver != 0 && chk != 0x2bc830a3u)  return -1;  /* bech32m */
 
-    /* Convert remaining 5-bit groups (minus 6 checksum) back to 8-bit */
+    /* Convert remaining 5-bit groups (minus the 1 version byte and 6 checksum chars)
+     * back to 8-bit bytes. pad=0 means we reject any trailing leftover bits. */
     size_t conv_len = 0;
     if (!convertbits(prog_out, &conv_len,
                      data + 1, data_len - 7, 5, 8, 0))
