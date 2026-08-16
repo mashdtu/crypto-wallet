@@ -58,4 +58,22 @@ int network_broadcast(const char *tx_hex, char *txid_out);
  */
 int network_get_btc_price(const char *currency, double *price_out);
 
+/*
+ * network_get_address_txs()
+ *
+ * Fetches the transaction history for a single address.
+ * net_value is positive for received, negative for spent (relative to address).
+ * block_time is 0 for unconfirmed transactions.
+ *
+ * Returns number of transactions found (>= 0), or -1 on error.
+ */
+typedef struct {
+    char txid[65];
+    int64_t net_value;
+    uint32_t block_time;
+    int confirmed;
+} addr_tx_t;
+
+int network_get_address_txs(const char *address, addr_tx_t *txs, int max_txs);
+
 #endif /* NETWORK_H */

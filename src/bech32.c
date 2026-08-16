@@ -111,7 +111,9 @@ int segwit_addr_encode(char *output, const char *hrp, int witver,
     memcpy(polymod_input + hrp_len, data, data_len);
     memset(polymod_input + hrp_len + data_len, 0, 6);
 
-    uint32_t chk = bech32_polymod(polymod_input, hrp_len + data_len + 6) ^ 1u;
+    /* Bech32 for v0, bech32m for v1+ */
+    uint32_t const_val = (witver == 0) ? 1u : 0x2bc830a3u;
+    uint32_t chk = bech32_polymod(polymod_input, hrp_len + data_len + 6) ^ const_val;
 
     /* Compute 6 checksum characters */
     uint8_t checksum[6];
@@ -129,4 +131,56 @@ int segwit_addr_encode(char *output, const char *hrp, int witver,
     output[h + 1 + data_len + 6] = '\0';
 
     return 1;
+}
+
+int segwit_addr_decode(const char *addr,
+                       char *hrp_out,
+                       unsigned char *prog_out,
+                       size_t *prog_len)
+{
+    /* Find the last '1' separator */
+    size_t addr_len = strlen(addr);
+    int sep = -1;
+    for (int i = (int)addr_len - 1; i >= 0; i--) {
+        if (addr[i] == '1') { sep = i; break; }
+    }
+    if (sep < 1 || sep + 7 > (int)addr_len) return -1;
+
+    /* Copy HRP */
+    memcpy(hrp_out, addr, (size_t)sep);
+    hrp_out[sep] = '\0';
+
+    /* Decode data characters from the charset */
+    size_t data_len = addr_len - sep - 1;
+    uint8_t data[128];
+    if (data_len > 128) return -1;
+    for (size_t i = 0; i < data_len; i++) {
+        const char *pos = strchr(CHARSET, addr[sep + 1 + i]);
+        if (!pos) return -1;
+        data[i] = (uint8_t)(pos - CHARSET);
+    }
+
+    /* Witness version is the first 5-bit value — peek before checksum verify
+     * so we know which constant to use (bech32 vs bech32m) */
+    int witver = data[0];
+    if (witver > 16) return -1;
+
+    /* Verify checksum:
+     * witness v0 uses bech32  (polymod == 1)
+     * witness v1+ uses bech32m (polymod == 0x2bc830a3) */
+    uint8_t polymod_input[256];
+    size_t hrp_expand_len = bech32_hrp_expand(hrp_out, polymod_input);
+    memcpy(polymod_input + hrp_expand_len, data, data_len);
+    uint32_t chk = bech32_polymod(polymod_input, hrp_expand_len + data_len);
+    if (witver == 0 && chk != 1u)          return -1;
+    if (witver != 0 && chk != 0x2bc830a3u) return -1;
+
+    /* Convert remaining 5-bit groups (minus 6 checksum) back to 8-bit */
+    size_t conv_len = 0;
+    if (!convertbits(prog_out, &conv_len,
+                     data + 1, data_len - 7, 5, 8, 0))
+        return -1;
+
+    *prog_len = conv_len;
+    return witver;
 }

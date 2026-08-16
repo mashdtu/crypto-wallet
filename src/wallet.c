@@ -109,7 +109,10 @@ int wallet_derive_address(const unsigned char *seed,
     /* Public key */
     secp256k1_context *ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN);
     secp256k1_pubkey pubkey;
-    secp256k1_ec_pubkey_create(ctx, &pubkey, k);
+    if (secp256k1_ec_pubkey_create(ctx, &pubkey, k) != 1) {
+        secp256k1_context_destroy(ctx);
+        return -1;
+    }
     unsigned char pub[33];
     size_t pub_len = 33;
     secp256k1_ec_pubkey_serialize(ctx, pub, &pub_len, &pubkey, SECP256K1_EC_COMPRESSED);
@@ -124,6 +127,48 @@ int wallet_derive_address(const unsigned char *seed,
     /* Bech32 */
     if (segwit_addr_encode(address_out, "tb", 0, h160, 20) != 1)
         return -1;
+
+    return 0;
+}
+
+int wallet_derive_key(const unsigned char *seed,
+                      uint32_t index,
+                      unsigned char *privkey_out,
+                      unsigned char *pubkey_out,
+                      unsigned char *hash160_out)
+{
+    unsigned char out[64];
+    unsigned int out_len;
+    if (HMAC(EVP_sha512(),
+             (const unsigned char *)"Bitcoin seed", 12,
+             seed, 64, out, &out_len) == NULL)
+        return -1;
+
+    unsigned char k[32], cc[32];
+    memcpy(k,  out,      32);
+    memcpy(cc, out + 32, 32);
+
+    if (derive_hardened_child(k, cc, 84u | 0x80000000u, k, cc) != 0) return -1;
+    if (derive_hardened_child(k, cc,  1u | 0x80000000u, k, cc) != 0) return -1;
+    if (derive_hardened_child(k, cc,  0u | 0x80000000u, k, cc) != 0) return -1;
+    if (derive_normal_child(k, cc, 0u,    k, cc) != 0) return -1;
+    if (derive_normal_child(k, cc, index, k, cc) != 0) return -1;
+
+    memcpy(privkey_out, k, 32);
+
+    secp256k1_context *ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN);
+    secp256k1_pubkey pubkey;
+    if (secp256k1_ec_pubkey_create(ctx, &pubkey, k) != 1) {
+        secp256k1_context_destroy(ctx);
+        return -1;
+    }
+    size_t pub_len = 33;
+    secp256k1_ec_pubkey_serialize(ctx, pubkey_out, &pub_len, &pubkey, SECP256K1_EC_COMPRESSED);
+    secp256k1_context_destroy(ctx);
+
+    unsigned char sha_out[32];
+    SHA256(pubkey_out, 33, sha_out);
+    RIPEMD160(sha_out, 32, hash160_out);
 
     return 0;
 }

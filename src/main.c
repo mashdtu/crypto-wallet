@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #include "keygen.h"
 #include "wallet.h"
@@ -216,22 +217,30 @@ static void settings_get_currency(char *out, size_t outsz)
 
 static int cmd_settings(void)
 {
+    static const char *currencies[] = {
+        "USD", "EUR", "GBP", "CAD", "CHF", "AUD", "JPY"
+    };
+    static const int ncurrencies = 7;
+
     char cur[16];
     settings_get_currency(cur, sizeof(cur));
     printf("Current currency display: %s\n\n", cur);
     printf("Select display currency:\n");
-    printf("  1. USD\n");
-    printf("  2. EUR\n");
-    printf("  3. None\n");
-    printf("Choice (1-3): ");
+    for (int i = 0; i < ncurrencies; i++)
+        printf("  %d. %s\n", i + 1, currencies[i]);
+    printf("  %d. None\n", ncurrencies + 1);
+    printf("Choice (1-%d): ", ncurrencies + 1);
     fflush(stdout);
 
     char ans[8];
     if (!fgets(ans, sizeof(ans), stdin)) return 1;
-    const char *choice;
-    if (ans[0] == '1')      choice = "USD";
-    else if (ans[0] == '2') choice = "EUR";
-    else                    choice = "NONE";
+    int choice = (int)strtol(ans, NULL, 10);
+
+    const char *selected;
+    if (choice >= 1 && choice <= ncurrencies)
+        selected = currencies[choice - 1];
+    else
+        selected = "NONE";
 
     /* Ensure ~/.config/btc-wallet/ exists */
     const char *home = getenv("HOME");
@@ -245,9 +254,9 @@ static int cmd_settings(void)
 
     FILE *f = fopen(settings_path(), "w");
     if (!f) { fprintf(stderr, "error: could not save settings\n"); return 1; }
-    fprintf(f, "%s\n", choice);
+    fprintf(f, "%s\n", selected);
     fclose(f);
-    printf("Currency display set to %s.\n", choice);
+    printf("Currency display set to %s.\n", selected);
     return 0;
 }
 
@@ -294,7 +303,7 @@ static int cmd_address(const char *index_str)
     return 0;
 }
 
-static int cmd_balance(void)
+static int cmd_balance(uint32_t gap_limit)
 {
     if (access(DEFAULT_SEED_PATH, F_OK) != 0) {
         fprintf(stderr, "error: %s not found -- run 'wallet init' first\n", DEFAULT_SEED_PATH);
@@ -344,7 +353,7 @@ static int cmd_balance(void)
             fflush(stdout);
             on_dot_line = 1;
             gap++;
-            if (gap >= GAP_LIMIT) break;
+            if (gap >= gap_limit) break;
         }
         index++;
     }
@@ -386,11 +395,15 @@ static int cmd_send(const char *dest_addr, const char *amount_str, const char *f
     char dest_hrp[16];
     unsigned char dest_prog[40];
     size_t dest_prog_len = 0;
-    if (segwit_addr_decode(dest_addr, dest_hrp, dest_prog, &dest_prog_len) < 0
-        || dest_prog_len != 20) {
+    int dest_witver = segwit_addr_decode(dest_addr, dest_hrp, dest_prog, &dest_prog_len);
+    if (dest_witver < 0
+        || (dest_prog_len != 20 && dest_prog_len != 32)
+        || (dest_witver == 0 && dest_prog_len != 20)
+        || (dest_witver == 1 && dest_prog_len != 32)) {
         fprintf(stderr, "error: invalid destination address\n");
         return 1;
     }
+    (void)dest_witver;
 
     if (access(DEFAULT_SEED_PATH, F_OK) != 0) {
         fprintf(stderr, "error: %s not found -- run 'wallet init' first\n", DEFAULT_SEED_PATH);
@@ -541,7 +554,7 @@ static int cmd_send(const char *dest_addr, const char *amount_str, const char *f
     /* Build and sign */
     char tx_hex[8192];
     if (tx_build_sign(utxos, n_utxos,
-                      dest_prog, amount_sat,
+                      dest_prog, dest_prog_len, amount_sat,
                       change_sat > 0 ? our_hash160 : NULL, change_sat,
                       privkey, pubkey,
                       tx_hex, sizeof(tx_hex)) != 0) {
@@ -709,18 +722,151 @@ static void usage(const char *prog)
 {
     fprintf(stderr,
             "Usage:\n"
-            "  %s [--file <path>] init             generate a new wallet\n"
-            "  %s [--file <path>] restore          restore a wallet from a mnemonic\n"
-            "  %s [--file <path>] address <index>  show receive address at index\n"
-            "  %s [--file <path>] balance          show total balance (scans addresses)\n"
+            "  %s [--file <path>] init               generate a new wallet\n"
+            "  %s [--file <path>] restore            restore a wallet from a mnemonic\n"
+            "  %s [--file <path>] address <index>    show receive address at index\n"
+            "  %s [--file <path>] balance [gap]      show total balance (scans addresses)\n"
+            "  %s [--file <path>] history [gap]      show transaction history\n"
             "  %s [--file <path>] send <addr> <sat> [fee_sat]  send funds\n"
-            "  %s [--file <path>] check <address>             check if address is yours\n"
-            "  %s usb-format                       wipe a USB drive for use as a wallet key\n"
-            "  %s eject                            safely eject the wallet USB\n"
-            "  %s settings                         configure display currency (USD/EUR)\n"
+            "  %s [--file <path>] check <address>              check if address is yours\n"
+            "  %s usb-format                         wipe a USB drive for use as a wallet key\n"
+            "  %s eject                              safely eject the wallet USB\n"
+            "  %s settings                           configure display currency\n"
             "\n"
             "  --file <path>  use a specific raw device or file instead of auto-detected USB\n",
-            prog, prog, prog, prog, prog, prog, prog, prog, prog);
+            prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
+}
+
+#define MAX_HISTORY_TXS 512
+
+static int compare_tx_time(const void *a, const void *b)
+{
+    const addr_tx_t *ta = (const addr_tx_t *)a;
+    const addr_tx_t *tb = (const addr_tx_t *)b;
+    /* Unconfirmed (block_time==0) sorts first (treated as most recent) */
+    uint32_t ka = (ta->confirmed && ta->block_time) ? ta->block_time : UINT32_MAX;
+    uint32_t kb = (tb->confirmed && tb->block_time) ? tb->block_time : UINT32_MAX;
+    if (ka > kb) return -1;
+    if (ka < kb) return  1;
+    return 0;
+}
+
+static int cmd_history(uint32_t gap_limit)
+{
+    if (access(DEFAULT_SEED_PATH, F_OK) != 0) {
+        fprintf(stderr, "error: %s not found -- run 'wallet init' first\n", DEFAULT_SEED_PATH);
+        return 1;
+    }
+    char *password = getpass("Wallet password: ");
+    if (!password) return 1;
+    printf("\n");
+
+    unsigned char seed[64];
+    if (storage_decrypt(DEFAULT_SEED_PATH, password, seed) != 0) {
+        fprintf(stderr, "error: decryption failed\n");
+        return 1;
+    }
+
+    addr_tx_t *all = malloc(MAX_HISTORY_TXS * sizeof(addr_tx_t));
+    if (!all) { memset(seed, 0, sizeof(seed)); return 1; }
+    int total = 0;
+
+    uint32_t gap = 0, index = 0;
+    printf("Scanning addresses...\n");
+    fflush(stdout);
+
+    while (gap < gap_limit) {
+        char address[73];
+        if (wallet_derive_address(seed, index, address) != 0) break;
+
+        addr_tx_t page[50];
+        int n = network_get_address_txs(address, page, 50);
+        if (n < 0) {
+            fprintf(stderr, "error: network request failed for index %u\n", index);
+            break;
+        }
+        if (n == 0) { gap++; index++; continue; }
+        gap = 0;
+
+        for (int i = 0; i < n && total < MAX_HISTORY_TXS; i++) {
+            /* Merge duplicate txids (same tx touches multiple of our addresses) */
+            int found = 0;
+            for (int j = 0; j < total; j++) {
+                if (strcmp(all[j].txid, page[i].txid) == 0) {
+                    all[j].net_value += page[i].net_value;
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) {
+                all[total] = page[i];
+                total++;
+            }
+        }
+        index++;
+    }
+    memset(seed, 0, sizeof(seed));
+
+    /* Sort most recent first */
+    qsort(all, (size_t)total, sizeof(addr_tx_t), compare_tx_time);
+
+    /* Fetch fiat price if configured */
+    char currency[16];
+    settings_get_currency(currency, sizeof(currency));
+    double btc_price = 0.0;
+    int have_price = (strcmp(currency, "NONE") != 0)
+                     && (network_get_btc_price(currency, &btc_price) == 0);
+
+    if (total == 0) {
+        printf("No transactions found.\n");
+        free(all);
+        return 0;
+    }
+
+    printf("\n");
+    for (int i = 0; i < total; i++) {
+        addr_tx_t *tx = &all[i];
+
+        /* Format date */
+        char date_str[24];
+        if (tx->confirmed && tx->block_time > 0) {
+            time_t t = (time_t)tx->block_time;
+            struct tm *tm_p = gmtime(&t);
+            strftime(date_str, sizeof(date_str), "%Y-%m-%d %H:%M", tm_p);
+        } else {
+            snprintf(date_str, sizeof(date_str), "unconfirmed  ");
+        }
+
+        /* Short txid: first8...last8 */
+        char short_txid[20];
+        snprintf(short_txid, sizeof(short_txid), "%.8s..%.8s",
+                 tx->txid, tx->txid + 56);
+
+        /* Amount */
+        char sign = tx->net_value >= 0 ? '+' : '-';
+        uint64_t abs_val = tx->net_value >= 0
+                           ? (uint64_t)tx->net_value
+                           : (uint64_t)(-tx->net_value);
+        char s_val[32];
+        fmt_sat(abs_val, s_val, sizeof(s_val));
+
+        /* Optional fiat */
+        char fiat_str[48] = "";
+        if (have_price) {
+            char f_val[32];
+            fmt_fiat((double)abs_val / 1e8 * btc_price, currency, f_val, sizeof(f_val));
+            snprintf(fiat_str, sizeof(fiat_str), " (~%s)", f_val);
+        }
+
+        printf("  %s  %s  %c%s sat%s  [%s]\n",
+               date_str, short_txid,
+               sign, s_val, fiat_str,
+               tx->confirmed ? "confirmed" : "unconfirmed");
+    }
+    printf("\n%d transaction%s\n", total, total == 1 ? "" : "s");
+
+    free(all);
+    return 0;
 }
 
 static int cmd_eject(void)
@@ -884,7 +1030,17 @@ int main(int argc, char *argv[])
     }
 
     if (strcmp(argv[argi], "balance") == 0) {
-        return cmd_balance();
+        uint32_t gap = GAP_LIMIT;
+        if (argc > argi + 1) gap = (uint32_t)strtoul(argv[argi + 1], NULL, 10);
+        if (gap == 0) gap = GAP_LIMIT;
+        return cmd_balance(gap);
+    }
+
+    if (strcmp(argv[argi], "history") == 0) {
+        uint32_t gap = GAP_LIMIT;
+        if (argc > argi + 1) gap = (uint32_t)strtoul(argv[argi + 1], NULL, 10);
+        if (gap == 0) gap = GAP_LIMIT;
+        return cmd_history(gap);
     }
 
     if (strcmp(argv[argi], "send") == 0) {

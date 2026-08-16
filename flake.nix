@@ -23,6 +23,7 @@
           pkgs.valgrind
           pkgs.bear
           pkgs.util-linux      # wipefs for clearing USB partition tables
+          pkgs.curl            # libcurl for mempool.space API queries
         ];
 
         shellHook = ''

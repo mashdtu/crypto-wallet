@@ -207,3 +207,120 @@ int network_get_btc_price(const char *currency, double *price_out)
     *price_out = (double)val;
     return 0;
 }
+
+/* Compute net sat change for addr within a bounded JSON range [json, end).
+ * Positive = received (vout), negative = spent (vin.prevout). */
+static int64_t tx_net_for_addr(const char *json, const char *end, const char *addr)
+{
+    int64_t net = 0;
+    char pat[128];
+    snprintf(pat, sizeof(pat), "\"scriptpubkey_address\":\"%s\"", addr);
+    size_t plen = strlen(pat);
+    const char *p = json;
+    while ((p = strstr(p, pat)) != NULL && p < end) {
+        /* Scan back to the nearest { that opens this scriptpubkey object */
+        const char *brace = p;
+        while (brace > json && *brace != '{') brace--;
+        /* Check if that { is preceded by "prevout": (skip whitespace) */
+        const char *pre = brace > json ? brace - 1 : json;
+        while (pre > json && (*pre == ' ' || *pre == '\t' || *pre == '\n' || *pre == '\r')) pre--;
+        int in_prevout = (*pre == ':' && pre >= json + 9 &&
+                          strncmp(pre - 9, "\"prevout\"", 9) == 0);
+        /* Find "value": after this match */
+        const char *vp = strstr(p + plen, "\"value\":");
+        if (vp && vp < end) {
+            const char *vs = vp + 8;
+            while (*vs == ' ') vs++;
+            int64_t val = (int64_t)strtoll(vs, NULL, 10);
+            if (in_prevout) net -= val;
+            else            net += val;
+        }
+        p += plen;
+    }
+    return net;
+}
+
+int network_get_address_txs(const char *address, addr_tx_t *txs, int max_txs)
+{
+    char url[256];
+    snprintf(url, sizeof(url), "%s/address/%s/txs", API_BASE, address);
+    buf_t resp = {0};
+    if (http_get(url, &resp) != 0) return -1;
+    if (!resp.data || resp.len == 0) { free(resp.data); return 0; }
+
+    int count = 0;
+    const char *p = resp.data;
+
+    while (count < max_txs) {
+        const char *txid_key = strstr(p, "\"txid\":\"");
+        if (!txid_key) break;
+
+        /* Extract txid value */
+        const char *txid_val = txid_key + 8;
+        char txid[65] = {0};
+        int i = 0;
+        while (txid_val[i] && txid_val[i] != '"' && i < 64)
+            txid[i] = txid_val[i++];
+
+        /* Distinguish top-level tx txid from vin txid:
+         * tx-level: followed by "version":N
+         * vin-level: followed by "vout":N  */
+        const char *after = txid_val + i + 1;
+        while (*after == ' ' || *after == '\t' || *after == '\r' ||
+               *after == '\n' || *after == ',') after++;
+        if (strncmp(after, "\"version\":", 10) != 0) {
+            p = txid_key + 8;
+            continue;
+        }
+
+        /* Find tx object start */
+        const char *tx_start = txid_key;
+        while (tx_start > resp.data && *tx_start != '{') tx_start--;
+
+        /* Find status block and derive tx_end */
+        const char *status_p = strstr(txid_key, "\"status\":{");
+        int confirmed = 0;
+        uint32_t block_time = 0;
+        const char *tx_end = NULL;
+
+        if (status_p) {
+            const char *conf = strstr(status_p, "\"confirmed\":");
+            if (conf) {
+                const char *cv = conf + 12;
+                while (*cv == ' ') cv++;
+                confirmed = (strncmp(cv, "true", 4) == 0);
+            }
+            if (confirmed) {
+                int64_t bt = json_get_int(status_p, "block_time");
+                if (bt > 0) block_time = (uint32_t)bt;
+            }
+            /* Walk depth to find closing } of status, then closing } of tx */
+            const char *sp = status_p + 9;
+            int depth = 1;
+            while (*sp && depth > 0) {
+                if (*sp == '{') depth++;
+                else if (*sp == '}') depth--;
+                sp++;
+            }
+            while (*sp == ' ' || *sp == '\n' || *sp == '\t' || *sp == '\r') sp++;
+            if (*sp == '}') tx_end = sp + 1;
+        }
+
+        if (!tx_end) {
+            p = txid_key + 8;
+            continue;
+        }
+
+        txs[count].net_value  = tx_net_for_addr(tx_start, tx_end, address);
+        txs[count].block_time = block_time;
+        txs[count].confirmed  = confirmed;
+        strncpy(txs[count].txid, txid, 64);
+        txs[count].txid[64] = '\0';
+        count++;
+
+        p = tx_end;
+    }
+
+    free(resp.data);
+    return count;
+}
