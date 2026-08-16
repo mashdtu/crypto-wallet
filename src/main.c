@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <sys/stat.h>
 
 #include "keygen.h"
 #include "wallet.h"
@@ -24,7 +25,7 @@ static int find_usb_device(char *dev_out, size_t dev_size)
     while ((be = readdir(bd)) != NULL) {
         if (strncmp(be->d_name, "sd", 2) != 0) continue;
 
-        char rem[128];
+        char rem[512];
         snprintf(rem, sizeof(rem), "/sys/block/%s/removable", be->d_name);
         FILE *f = fopen(rem, "r");
         if (!f) continue;
@@ -43,7 +44,7 @@ static int find_usb_device(char *dev_out, size_t dev_size)
 
 static void init_seed_path(void)
 {
-    char dev[64];
+    char dev[512];
     if (!find_usb_device(dev, sizeof(dev))) {
         fprintf(stderr, "error: no USB drive found -- insert your wallet USB and try again\n");
         exit(1);
@@ -149,6 +150,120 @@ static int cmd_init(void)
     return 0;
 }
 
+#include "network.h"
+#include "tx.h"
+#include "bech32.h"
+
+#define GAP_LIMIT 20
+#define DUST_LIMIT 546
+
+/* Format a uint64_t with comma separators into buf. Returns buf. */
+static char *fmt_sat(uint64_t v, char *buf, size_t bufsz)
+{
+    char tmp[32];
+    int len = snprintf(tmp, sizeof(tmp), "%llu", (unsigned long long)v);
+    int out = 0;
+    for (int i = 0; i < len && out < (int)bufsz - 1; i++) {
+        if (i > 0 && (len - i) % 3 == 0)
+            buf[out++] = ',';
+        buf[out++] = tmp[i];
+    }
+    buf[out] = '\0';
+    return buf;
+}
+
+/* Format a fiat amount with commas and 2 decimal places, e.g. "USD 1,234.56" */
+static char *fmt_fiat(double amount, const char *currency, char *buf, size_t bufsz)
+{
+    long long cents = (long long)(amount * 100.0 + 0.5);
+    long long whole = cents / 100;
+    int frac = (int)(cents % 100);
+    char w[32];
+    fmt_sat((uint64_t)(whole < 0 ? 0 : whole), w, sizeof(w));
+    snprintf(buf, bufsz, "%s %s.%02d", currency, w, frac);
+    return buf;
+}
+
+/* Settings: store currency preference in ~/.config/btc-wallet/currency */
+static const char *settings_path(void)
+{
+    static char path[512];
+    /* Under sudo, HOME is /root — use the real user's home instead */
+    const char *home = getenv("SUDO_USER") ? NULL : getenv("HOME");
+    if (!home) {
+        const char *sudo_user = getenv("SUDO_USER");
+        if (sudo_user) {
+            char pw_buf[256];
+            snprintf(pw_buf, sizeof(pw_buf), "/home/%s", sudo_user);
+            home = pw_buf;
+            snprintf(path, sizeof(path), "%s/.config/btc-wallet/currency", pw_buf);
+            return path;
+        }
+        home = "/tmp";
+    }
+    snprintf(path, sizeof(path), "%s/.config/btc-wallet/currency", home);
+    return path;
+}
+
+static void settings_get_currency(char *out, size_t outsz)
+{
+    FILE *f = fopen(settings_path(), "r");
+    if (!f) { strncpy(out, "NONE", outsz); return; }
+    if (!fgets(out, (int)outsz, f)) strncpy(out, "NONE", outsz);
+    fclose(f);
+    out[strcspn(out, "\r\n")] = '\0';
+}
+
+static int cmd_settings(void)
+{
+    char cur[16];
+    settings_get_currency(cur, sizeof(cur));
+    printf("Current currency display: %s\n\n", cur);
+    printf("Select display currency:\n");
+    printf("  1. USD\n");
+    printf("  2. EUR\n");
+    printf("  3. None\n");
+    printf("Choice (1-3): ");
+    fflush(stdout);
+
+    char ans[8];
+    if (!fgets(ans, sizeof(ans), stdin)) return 1;
+    const char *choice;
+    if (ans[0] == '1')      choice = "USD";
+    else if (ans[0] == '2') choice = "EUR";
+    else                    choice = "NONE";
+
+    /* Ensure ~/.config/btc-wallet/ exists */
+    const char *home = getenv("HOME");
+    if (home) {
+        char dir[512];
+        snprintf(dir, sizeof(dir), "%s/.config", home);
+        mkdir(dir, 0700);
+        snprintf(dir, sizeof(dir), "%s/.config/btc-wallet", home);
+        mkdir(dir, 0700);
+    }
+
+    FILE *f = fopen(settings_path(), "w");
+    if (!f) { fprintf(stderr, "error: could not save settings\n"); return 1; }
+    fprintf(f, "%s\n", choice);
+    fclose(f);
+    printf("Currency display set to %s.\n", choice);
+    return 0;
+}
+
+/* Returns the index if address belongs to this seed, -1 otherwise. */
+static int address_index_in_wallet(const unsigned char *seed,
+                                   const char *target,
+                                   uint32_t max_index)
+{
+    for (uint32_t i = 0; i < max_index; i++) {
+        char address[73];
+        if (wallet_derive_address(seed, i, address) != 0) return -1;
+        if (strcmp(address, target) == 0) return (int)i;
+    }
+    return -1;
+}
+
 static int cmd_address(const char *index_str)
 {
     unsigned long index = strtoul(index_str, NULL, 10);
@@ -177,6 +292,318 @@ static int cmd_address(const char *index_str)
     memset(seed, 0, sizeof(seed));
     printf("%s\n", address);
     return 0;
+}
+
+static int cmd_balance(void)
+{
+    if (access(DEFAULT_SEED_PATH, F_OK) != 0) {
+        fprintf(stderr, "error: %s not found -- run 'wallet init' first\n", DEFAULT_SEED_PATH);
+        return 1;
+    }
+
+    char *password = getpass("Wallet password: ");
+    if (!password) return 1;
+
+    unsigned char seed[64];
+    if (storage_decrypt(DEFAULT_SEED_PATH, password, seed) != 0) {
+        fprintf(stderr, "error: decryption failed (wrong password or corrupt file)\n");
+        return 1;
+    }
+
+    int64_t total = 0;
+    int gap = 0;
+    uint32_t index = 0;
+    int on_dot_line = 0;
+
+    printf("Scanning addresses\n");
+    fflush(stdout);
+
+    for (;;) {
+        char address[73];
+        if (wallet_derive_address(seed, index, address) != 0) {
+            fprintf(stderr, "\nerror: failed to derive address at index %u\n", index);
+            memset(seed, 0, sizeof(seed));
+            return 1;
+        }
+
+        int64_t bal = network_get_balance(address);
+        if (bal < 0) {
+            fprintf(stderr, "\nerror: network request failed for index %u\n", index);
+            memset(seed, 0, sizeof(seed));
+            return 1;
+        }
+
+        if (bal > 0) {
+            if (on_dot_line) { printf("\n"); on_dot_line = 0; }
+            printf("  [%u] %s  %lld sat\n", index, address, (long long)bal);
+            fflush(stdout);
+            total += bal;
+            gap = 0;
+        } else {
+            printf(".");
+            fflush(stdout);
+            on_dot_line = 1;
+            gap++;
+            if (gap >= GAP_LIMIT) break;
+        }
+        index++;
+    }
+
+    memset(seed, 0, sizeof(seed));
+
+    char currency[16];
+    settings_get_currency(currency, sizeof(currency));
+    double btc_price = 0.0;
+    int have_price = (strcmp(currency, "NONE") != 0)
+                     && (network_get_btc_price(currency, &btc_price) == 0);
+
+    char s_total[32];
+    fmt_sat((uint64_t)(total < 0 ? 0 : total), s_total, sizeof(s_total));
+    printf("\nTotal balance: %s sat", s_total);
+    if (total > 0) {
+        printf(" (%.8f tBTC)", (double)total / 100000000.0);
+        if (have_price) {
+            char f_total[32];
+            fmt_fiat((double)total / 1e8 * btc_price, currency, f_total, sizeof(f_total));
+            printf(" (~%s)", f_total);
+        }
+    }
+    printf("\n");
+    return 0;
+}
+
+static int cmd_send(const char *dest_addr, const char *amount_str, const char *fee_str)
+{
+    uint64_t amount_sat = (uint64_t)strtoull(amount_str, NULL, 10);
+    uint64_t fee_sat    = fee_str ? (uint64_t)strtoull(fee_str, NULL, 10) : 1000u;
+
+    if (amount_sat == 0) {
+        fprintf(stderr, "error: invalid amount\n");
+        return 1;
+    }
+
+    /* Decode destination address */
+    char dest_hrp[16];
+    unsigned char dest_prog[40];
+    size_t dest_prog_len = 0;
+    if (segwit_addr_decode(dest_addr, dest_hrp, dest_prog, &dest_prog_len) < 0
+        || dest_prog_len != 20) {
+        fprintf(stderr, "error: invalid destination address\n");
+        return 1;
+    }
+
+    if (access(DEFAULT_SEED_PATH, F_OK) != 0) {
+        fprintf(stderr, "error: %s not found -- run 'wallet init' first\n", DEFAULT_SEED_PATH);
+        return 1;
+    }
+
+    char *password = getpass("Wallet password: ");
+    if (!password) return 1;
+    printf("\n");
+
+    unsigned char seed[64];
+    if (storage_decrypt(DEFAULT_SEED_PATH, password, seed) != 0) {
+        fprintf(stderr, "error: decryption failed\n");
+        return 1;
+    }
+
+    /* Derive key at index 0 */
+    unsigned char privkey[32], pubkey[33], our_hash160[20];
+    if (wallet_derive_key(seed, 0, privkey, pubkey, our_hash160) != 0) {
+        fprintf(stderr, "error: key derivation failed\n");
+        memset(seed, 0, sizeof(seed));
+        return 1;
+    }
+
+    /* Encode our address from hash160 */
+    char our_address[73];
+    if (segwit_addr_encode(our_address, "tb", 0, our_hash160, 20) != 1) {
+        fprintf(stderr, "error: address encoding failed\n");
+        memset(seed, 0, sizeof(seed));
+        memset(privkey, 0, 32);
+        return 1;
+    }
+
+    /* Fetch UTXOs */
+    tx_utxo_t utxos[64];
+    int n_utxos = network_get_utxos(our_address, (utxo_t *)utxos, 64);
+    if (n_utxos < 0) {
+        fprintf(stderr, "error: failed to fetch UTXOs\n");
+        memset(seed, 0, sizeof(seed));
+        memset(privkey, 0, 32);
+        return 1;
+    }
+    if (n_utxos == 0) {
+        fprintf(stderr, "error: no UTXOs found\n");
+        memset(seed, 0, sizeof(seed));
+        memset(privkey, 0, 32);
+        return 1;
+    }
+
+    /* Sum inputs */
+    uint64_t total_in = 0;
+    for (int i = 0; i < n_utxos; i++) total_in += utxos[i].value;
+
+    if (total_in < amount_sat + fee_sat) {
+        fprintf(stderr, "error: insufficient funds (%llu sat available, need %llu + %llu fee)\n",
+                (unsigned long long)total_in,
+                (unsigned long long)amount_sat,
+                (unsigned long long)fee_sat);
+        memset(seed, 0, sizeof(seed));
+        memset(privkey, 0, 32);
+        return 1;
+    }
+
+    uint64_t change_sat = total_in - amount_sat - fee_sat;
+    if (change_sat < DUST_LIMIT) {
+        fee_sat += change_sat;
+        change_sat = 0;
+    }
+
+    /* Check address ownership while seed is still live */
+    int dest_idx = address_index_in_wallet(seed, dest_addr, 1000);
+    memset(seed, 0, sizeof(seed));
+
+    /* Fetch dest balance for display */
+    int64_t to_bal_before = network_get_balance(dest_addr);
+    if (to_bal_before < 0) to_bal_before = 0;
+
+    uint64_t from_bal_before = total_in;
+    uint64_t from_bal_after  = change_sat;
+    uint64_t to_bal_after    = (uint64_t)to_bal_before + amount_sat;
+
+    char s_send[32], s_fee[32], s_fromb[32], s_froma[32], s_tob[32], s_toa[32];
+    fmt_sat(amount_sat,      s_send,  sizeof(s_send));
+    fmt_sat(fee_sat,         s_fee,   sizeof(s_fee));
+    fmt_sat(from_bal_before, s_fromb, sizeof(s_fromb));
+    fmt_sat(from_bal_after,  s_froma, sizeof(s_froma));
+    fmt_sat((uint64_t)to_bal_before, s_tob, sizeof(s_tob));
+    fmt_sat(to_bal_after,    s_toa,   sizeof(s_toa));
+
+    /* Fetch fiat price if configured */
+    char currency[16];
+    settings_get_currency(currency, sizeof(currency));
+    double btc_price = 0.0;
+    int have_price = (strcmp(currency, "NONE") != 0)
+                     && (network_get_btc_price(currency, &btc_price) == 0);
+
+    #define TO_FIAT(sat) ((double)(sat) / 1e8 * btc_price)
+
+    char f_send[32]  = "", f_fee[32]  = "";
+    char f_fromb[32] = "", f_froma[32] = "";
+    char f_tob[32]   = "", f_toa[32]   = "";
+    if (have_price) {
+        fmt_fiat(TO_FIAT(amount_sat),          currency, f_send,  sizeof(f_send));
+        fmt_fiat(TO_FIAT(fee_sat),             currency, f_fee,   sizeof(f_fee));
+        fmt_fiat(TO_FIAT(from_bal_before),     currency, f_fromb, sizeof(f_fromb));
+        fmt_fiat(TO_FIAT(from_bal_after),      currency, f_froma, sizeof(f_froma));
+        fmt_fiat(TO_FIAT((uint64_t)to_bal_before), currency, f_tob, sizeof(f_tob));
+        fmt_fiat(TO_FIAT(to_bal_after),        currency, f_toa,   sizeof(f_toa));
+    }
+    #undef TO_FIAT
+
+    /* build fiat suffix strings for reuse */
+    char suf_send[64]  = "";
+    char suf_fee[64]   = "";
+    char suf_fromb[64] = "";
+    char suf_froma[64] = "";
+    char suf_tob[64]   = "";
+    char suf_toa[64]   = "";
+    if (have_price) {
+        snprintf(suf_send,  sizeof(suf_send),  " (~%s)", f_send);
+        snprintf(suf_fee,   sizeof(suf_fee),   " (~%s)", f_fee);
+        snprintf(suf_fromb, sizeof(suf_fromb), " (~%s)", f_fromb);
+        snprintf(suf_froma, sizeof(suf_froma), " (~%s)", f_froma);
+        snprintf(suf_tob,   sizeof(suf_tob),   " (~%s)", f_tob);
+        snprintf(suf_toa,   sizeof(suf_toa),   " (~%s)", f_toa);
+    }
+
+    printf("Sending:  %s sat%s\n", s_send, suf_send);
+    printf("Fee:      %s sat%s\n\n", s_fee, suf_fee);
+    printf("From:     %s  (yours, index 0)\n          %s sat%s -> %s sat%s\n\n",
+           our_address, s_fromb, suf_fromb, s_froma, suf_froma);
+    if (dest_idx >= 0)
+        printf("To:       %s  (yours, index %d)\n          %s sat%s -> %s sat%s\n",
+               dest_addr, dest_idx, s_tob, suf_tob, s_toa, suf_toa);
+    else
+        printf("To:       %s  (external)\n          %s sat%s -> %s sat%s\n",
+               dest_addr, s_tob, suf_tob, s_toa, suf_toa);
+    printf("\nConfirm? (yes/no): ");
+    fflush(stdout);
+
+    char ans[8];
+    if (!fgets(ans, sizeof(ans), stdin) || (ans[0] != 'y' && ans[0] != 'Y')) {
+        printf("Aborted.\n");
+        memset(privkey, 0, 32);
+        return 1;
+    }
+
+    /* Build and sign */
+    char tx_hex[8192];
+    if (tx_build_sign(utxos, n_utxos,
+                      dest_prog, amount_sat,
+                      change_sat > 0 ? our_hash160 : NULL, change_sat,
+                      privkey, pubkey,
+                      tx_hex, sizeof(tx_hex)) != 0) {
+        fprintf(stderr, "error: transaction build/sign failed\n");
+        memset(privkey, 0, 32);
+        return 1;
+    }
+    memset(privkey, 0, 32);
+
+    printf("Broadcasting [...]");
+    fflush(stdout);
+
+    char txid[65] = {0};
+    if (network_broadcast(tx_hex, txid) != 0) {
+        fprintf(stderr, "\nerror: broadcast failed\n");
+        return 1;
+    }
+    printf("\rBroadcasting [COMPLETE]\n");
+    printf("txid: %s\n", txid);
+    printf("https://mempool.space/testnet4/tx/%s\n", txid);
+    return 0;
+}
+
+/* Returns the index if address belongs to this seed, -1 otherwise.
+ * Scans up to max_index addresses. */
+
+static int cmd_check(const char *target)
+{
+    if (access(DEFAULT_SEED_PATH, F_OK) != 0) {
+        fprintf(stderr, "error: %s not found -- run 'wallet init' first\n", DEFAULT_SEED_PATH);
+        return 1;
+    }
+
+    char *password = getpass("Wallet password: ");
+    if (!password) return 1;
+
+    unsigned char seed[64];
+    if (storage_decrypt(DEFAULT_SEED_PATH, password, seed) != 0) {
+        fprintf(stderr, "error: decryption failed\n");
+        return 1;
+    }
+
+    printf("Scanning...");
+    fflush(stdout);
+
+    for (uint32_t i = 0; i < 10000u; i++) {
+        char address[73];
+        if (wallet_derive_address(seed, i, address) != 0) {
+            fprintf(stderr, "\nerror: derivation failed at index %u\n", i);
+            memset(seed, 0, sizeof(seed));
+            return 1;
+        }
+        if (strcmp(address, target) == 0) {
+            memset(seed, 0, sizeof(seed));
+            printf("\rAddress belongs to this wallet (index %u).\n", i);
+            return 0;
+        }
+    }
+
+    memset(seed, 0, sizeof(seed));
+    printf("\rAddress does NOT belong to this wallet (checked 10000 indices).\n");
+    return 1;
 }
 
 static int cmd_restore(void)
@@ -285,16 +712,20 @@ static void usage(const char *prog)
             "  %s [--file <path>] init             generate a new wallet\n"
             "  %s [--file <path>] restore          restore a wallet from a mnemonic\n"
             "  %s [--file <path>] address <index>  show receive address at index\n"
+            "  %s [--file <path>] balance          show total balance (scans addresses)\n"
+            "  %s [--file <path>] send <addr> <sat> [fee_sat]  send funds\n"
+            "  %s [--file <path>] check <address>             check if address is yours\n"
             "  %s usb-format                       wipe a USB drive for use as a wallet key\n"
             "  %s eject                            safely eject the wallet USB\n"
+            "  %s settings                         configure display currency (USD/EUR)\n"
             "\n"
             "  --file <path>  use a specific raw device or file instead of auto-detected USB\n",
-            prog, prog, prog, prog, prog);
+            prog, prog, prog, prog, prog, prog, prog, prog, prog);
 }
 
 static int cmd_eject(void)
 {
-    char dev[64];
+    char dev[512];
     if (!find_usb_device(dev, sizeof(dev))) {
         fprintf(stderr, "error: no USB drive found\n");
         return 1;
@@ -319,7 +750,7 @@ static int cmd_eject(void)
 static int cmd_usb_format(void)
 {
     /* Scan /sys/block for removable block devices */
-    char devs[8][64];
+    char devs[8][512];
     char sizes[8][32];
     int count = 0;
 
@@ -332,7 +763,7 @@ static int cmd_usb_format(void)
     while ((be = readdir(bd)) != NULL && count < 8) {
         if (strncmp(be->d_name, "sd", 2) != 0) continue;
 
-        char rem[128];
+        char rem[512];
         snprintf(rem, sizeof(rem), "/sys/block/%s/removable", be->d_name);
         FILE *f = fopen(rem, "r");
         if (!f) continue;
@@ -341,11 +772,16 @@ static int cmd_usb_format(void)
         fclose(f);
         if (val[0] != '1') continue;
 
-        char szpath[128];
+        char szpath[512];
         snprintf(szpath, sizeof(szpath), "/sys/block/%s/size", be->d_name);
         FILE *sf = fopen(szpath, "r");
         unsigned long long sectors = 0;
-        if (sf) { fscanf(sf, "%llu", &sectors); fclose(sf); }
+        if (sf) {
+            char szbuf[32] = {0};
+            if (fgets(szbuf, sizeof(szbuf), sf))
+                sectors = strtoull(szbuf, NULL, 10);
+            fclose(sf);
+        }
         unsigned long long mb = (sectors * 512ULL) / (1024ULL * 1024ULL);
 
         snprintf(devs[count],  sizeof(devs[count]),  "/dev/%s", be->d_name);
@@ -391,7 +827,7 @@ static int cmd_usb_format(void)
     /* Unmount any mounted partitions */
     char cmd[256];
     snprintf(cmd, sizeof(cmd), "umount %s?* %s 2>/dev/null; true", dev, dev);
-    system(cmd);
+    if (system(cmd) != 0) { /* best-effort, ignore failure */ }
 
     /* Wipe all signatures and partition tables */
     printf("Wiping %s [...]", dev);
@@ -433,6 +869,10 @@ int main(int argc, char *argv[])
         return cmd_eject();
     }
 
+    if (strcmp(argv[argi], "settings") == 0) {
+        return cmd_settings();
+    }
+
     if (!path_set) init_seed_path();
 
     if (strcmp(argv[argi], "init") == 0) {
@@ -441,6 +881,27 @@ int main(int argc, char *argv[])
 
     if (strcmp(argv[argi], "restore") == 0) {
         return cmd_restore();
+    }
+
+    if (strcmp(argv[argi], "balance") == 0) {
+        return cmd_balance();
+    }
+
+    if (strcmp(argv[argi], "send") == 0) {
+        if (argc <= argi + 2) {
+            fprintf(stderr, "Usage: %s send <address> <satoshis> [fee_sat]\n", argv[0]);
+            return 1;
+        }
+        return cmd_send(argv[argi + 1], argv[argi + 2],
+                        argc > argi + 3 ? argv[argi + 3] : NULL);
+    }
+
+    if (strcmp(argv[argi], "check") == 0) {
+        if (argc <= argi + 1) {
+            fprintf(stderr, "Usage: %s check <address>\n", argv[0]);
+            return 1;
+        }
+        return cmd_check(argv[argi + 1]);
     }
 
     if (strcmp(argv[argi], "address") == 0) {
