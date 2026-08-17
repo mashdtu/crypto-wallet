@@ -1,5 +1,7 @@
 # Bitcoin Wallet
 
+DISCLAIMER: THIS PROJECT IS NOT GUARANTEED SAFE AND IS THEREFORE NOT APPLICABLE FOR COMMERCIAL OR PERSONAL FINANCIAL USE.
+
 A self-custody Bitcoin mainnet wallet written in C. The private key never touches your hard drive, it lives encrypted on a USB drive and is decrypted in memory only while a command is running, then wiped immediately.
 
 ## What it does
