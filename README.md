@@ -39,11 +39,6 @@ If someone steals your USB, they have an encrypted blob. Without your password t
 
 First install the dependencies for your distro:
 
-**NixOS:**
-```bash
-nix develop
-```
-
 **Debian / Ubuntu:**
 ```bash
 sudo apt install gcc libssl-dev libsecp256k1-dev libcurl4-openssl-dev pkg-config udisks2 util-linux
