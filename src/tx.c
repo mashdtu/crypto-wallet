@@ -125,16 +125,16 @@ static void bytes_to_hex(const unsigned char *in, size_t len, char *out)
  * The preimage for SIGHASH_ALL is:
  *
  *   dSHA256(
- *     nVersion(4LE)        -- transaction version
- *     hashPrevouts(32)     -- dSHA256 of all outpoints (commit to which UTXOs)
- *     hashSequence(32)     -- dSHA256 of all nSequence values
- *     outpoint(36)         -- this input's txid + vout
- *     scriptCode(26)       -- the P2PKH scriptCode for P2WPKH inputs
- *     value(8LE)           -- satoshi value of this input
- *     nSequence(4LE)       -- this input's sequence number
- *     hashOutputs(32)      -- dSHA256 of all outputs (commit to where money goes)
+ *     nVersion(4LE)        - transaction version
+ *     hashPrevouts(32)     - dSHA256 of all outpoints (commit to which UTXOs)
+ *     hashSequence(32)     - dSHA256 of all nSequence values
+ *     outpoint(36)         - this input's txid + vout
+ *     scriptCode(26)       - the P2PKH scriptCode for P2WPKH inputs
+ *     value(8LE)           - satoshi value of this input
+ *     nSequence(4LE)       - this input's sequence number
+ *     hashOutputs(32)      - dSHA256 of all outputs (commit to where money goes)
  *     nLocktime(4LE)
- *     sighash_type(4LE)    -- 0x01 = SIGHASH_ALL
+ *     sighash_type(4LE)    - 0x01 = SIGHASH_ALL
  *   )
  *
  * We call this once per input, varying only input_idx.

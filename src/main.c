@@ -765,12 +765,12 @@ static int cmd_restore(void)
         while (wlen > 0 && (word[wlen-1] == '\n' || word[wlen-1] == '\r' || word[wlen-1] == ' '))
             word[--wlen] = '\0';
         if (wlen == 0) {
-            fprintf(stderr, "Empty word -- aborted\n");
+            fprintf(stderr, "Empty word - aborted\n");
             memset(mnemonic, 0, sizeof(mnemonic));
             return 1;
         }
         if (!keygen_valid_word(word)) {
-            fprintf(stderr, "  '%s' is not in the BIP-39 wordlist -- try again\n", word);
+            fprintf(stderr, "  '%s' is not in the BIP-39 wordlist - try again\n", word);
             i--;
             continue;
         }
@@ -979,14 +979,14 @@ static int compare_tx_time(const void *a, const void *b)
  * After collecting and deduplicating, transactions are sorted newest-first.
  * A running balance is computed by walking oldest-to-newest from the current
  * balance. If there are more transactions than the API returns (~25 per
- * address), the running balance may go negative -- those rows show '---'
+ * address), the running balance may go negative, those rows show '---'
  * for the balance column to indicate missing history rather than showing
  * a wrong number.
  */
 static int cmd_history(uint32_t gap_limit)
 {
     if (access(DEFAULT_SEED_PATH, F_OK) != 0) {
-        fprintf(stderr, "error: %s not found -- run 'wallet init' first\n", DEFAULT_SEED_PATH);
+        fprintf(stderr, "error: %s not found - run 'wallet init' first\n", DEFAULT_SEED_PATH);
         return 1;
     }
     char *password = getpass("Wallet password: ");
@@ -1173,7 +1173,7 @@ static int cmd_eject(void)
     snprintf(cmd, sizeof(cmd), "udisksctl power-off -b %s", dev);
     int rc = system(cmd);
     if (rc != 0) {
-        fprintf(stderr, "Power-off failed -- you may need to install udisks2\n");
+        fprintf(stderr, "Power-off failed - you may need to install udisks2\n");
         return 1;
     }
     printf("Safe to remove USB.\n");
@@ -1268,7 +1268,7 @@ static int cmd_usb_format(void)
     snprintf(cmd, sizeof(cmd), "wipefs -a %s", dev);
     int rc = system(cmd);
     if (rc != 0) {
-        fprintf(stderr, "\nWipe failed -- try running as root (sudo)\n");
+        fprintf(stderr, "\nWipe failed - try running as root (sudo)\n");
         return 1;
     }
     printf("\rWiping %s [COMPLETE]\n", dev);

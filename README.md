@@ -79,7 +79,7 @@ sudo wallet usb-format
 
 This runs `wipefs -a` to remove any existing partition tables and filesystems.
 The encrypted seed will be written directly to the raw device (offset 0),
-with no filesystem or partition table -- just 124 bytes of encrypted data.
+with no filesystem or partition table.
 
 ### 2. Create a wallet
 

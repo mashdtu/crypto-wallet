@@ -29,11 +29,11 @@
 #include <openssl/rand.h>
 
 #define SALT_LEN   32       /* salt for PBKDF2 */
-#define IV_LEN     12       /* GCM nonce -- 96 bits is the recommended size */
+#define IV_LEN     12       /* GCM nonce - 96 bits is the recommended size */
 #define SEED_LEN   64       /* BIP-32 seed */
 #define TAG_LEN    16       /* GCM authentication tag */
 #define KEY_LEN    32       /* AES-256 key */
-#define ITER       100000   /* PBKDF2 iterations -- ~1 second on modern hardware */
+#define ITER       100000   /* PBKDF2 iterations - ~1 second on modern hardware */
 #define FILE_SIZE  (SALT_LEN + IV_LEN + SEED_LEN + TAG_LEN)     /* 124 bytes */
 
 /*

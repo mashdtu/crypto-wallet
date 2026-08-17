@@ -34,7 +34,7 @@ int wallet_derive_address(const unsigned char *seed,
  * index       [in]  address index
  * privkey_out [out] 32-byte private key
  * pubkey_out  [out] 33-byte compressed public key
- * hash160_out [out] 20-byte HASH160(pubkey) -- the witness program
+ * hash160_out [out] 20-byte HASH160(pubkey) - the witness program
  *
  * Returns 0 on success, -1 on failure.
  */
