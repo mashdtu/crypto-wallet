@@ -34,17 +34,13 @@ compile_commands:
 clean:
 	rm -f wallet keygen tests/test_vector tools/crack
 
-INSTALL_DIR := $(HOME)/.local/bin
+INSTALL_DIR := /usr/local/bin
 
 install: wallet
-	@mkdir -p $(INSTALL_DIR)
 	@cp wallet $(INSTALL_DIR)/wallet
 	@echo "Installed to $(INSTALL_DIR)/wallet"
-	@if ! echo ":$$PATH:" | grep -q ":$(INSTALL_DIR):"; then \
-		echo "NOTE: add this to your shell config if not already present:"; \
-		echo "  export PATH=\"\$$HOME/.local/bin:\$$PATH\""; \
-	fi
 
 uninstall:
 	@rm -f $(INSTALL_DIR)/wallet
 	@echo "Removed $(INSTALL_DIR)/wallet"
+
