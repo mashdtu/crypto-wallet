@@ -476,7 +476,8 @@ static int cmd_balance(uint32_t gap_limit)
 static int cmd_send(const char *dest_addr, const char *amount_str, const char *fee_str)
 {
     uint64_t amount_sat = (uint64_t)strtoull(amount_str, NULL, 10);
-    uint64_t fee_sat    = fee_str ? (uint64_t)strtoull(fee_str, NULL, 10) : 1000u;
+    /* fee_sat is computed after UTXO fetch when auto-pricing from mempool */
+    uint64_t fee_sat    = fee_str ? (uint64_t)strtoull(fee_str, NULL, 10) : 0;
 
     if (amount_sat == 0) {
         fprintf(stderr, "error: invalid amount\n");
@@ -548,6 +549,21 @@ static int cmd_send(const char *dest_addr, const char *amount_str, const char *f
     /* Sum inputs */
     uint64_t total_in = 0;
     for (int i = 0; i < n_utxos; i++) total_in += utxos[i].value;
+
+    /* Auto-price fee from mempool when none was specified.
+     * vsize estimate: 10 base + 68 per P2WPKH input + 31 per output (2 outputs). */
+    if (fee_sat == 0) {
+        uint64_t rate = 0;
+        if (network_get_fee_rate(&rate) == 0) {
+            uint64_t vsize = 10 + (uint64_t)n_utxos * 68 + 62;
+            fee_sat = rate * vsize;
+            printf("Recommended fee rate: %llu sat/vbyte (~%llu vbytes)\n",
+                   (unsigned long long)rate, (unsigned long long)vsize);
+        } else {
+            fee_sat = 1000;
+            printf("Recommended fee rate: could not fetch from mempool, using 1000 sat fallback\n");
+        }
+    }
 
     if (total_in < amount_sat + fee_sat) {
         fprintf(stderr, "error: insufficient funds (%llu sat available, need %llu + %llu fee)\n",

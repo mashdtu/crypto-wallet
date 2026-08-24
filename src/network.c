@@ -260,6 +260,24 @@ int network_broadcast(const char *tx_hex, char *txid_out)
 }
 
 /*
+ * network_get_fee_rate()
+ *
+ * GET /api/v1/fees/recommended returns:
+ *   {"fastestFee":N,"halfHourFee":N,"hourFee":N,"economyFee":N,"minimumFee":N}
+ * We use halfHourFee as a sensible default (confirms within ~30 minutes).
+ */
+int network_get_fee_rate(uint64_t *rate_out)
+{
+    buf_t resp = {0};
+    if (http_get(API_BASE "/v1/fees/recommended", &resp) != 0) return -1;
+    int64_t val = json_get_int(resp.data, "halfHourFee");
+    free(resp.data);
+    if (val <= 0) return -1;
+    *rate_out = (uint64_t)val;
+    return 0;
+}
+
+/*
  * network_get_btc_price()
  *
  * Fetches the current BTC price from mempool.space's price endpoint.

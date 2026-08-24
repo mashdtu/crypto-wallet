@@ -76,4 +76,14 @@ typedef struct {
 
 int network_get_address_txs(const char *address, addr_tx_t *txs, int max_txs);
 
+/*
+ * network_get_fee_rate()
+ *
+ * Fetches the recommended fee rate (sat/vbyte) from mempool.space.
+ * Writes the half-hour confirmation target rate into rate_out.
+ *
+ * Returns 0 on success, -1 on failure.
+ */
+int network_get_fee_rate(uint64_t *rate_out);
+
 #endif /* NETWORK_H */
