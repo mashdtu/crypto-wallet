@@ -476,11 +476,12 @@ static int cmd_balance(uint32_t gap_limit)
 static int cmd_send(const char *dest_addr, const char *amount_str, const char *fee_str,
                     uint32_t from_index)
 {
-    uint64_t amount_sat = (uint64_t)strtoull(amount_str, NULL, 10);
+    int send_max = (strcmp(amount_str, "max") == 0);
+    uint64_t amount_sat = send_max ? 0 : (uint64_t)strtoull(amount_str, NULL, 10);
     /* fee_sat is computed after UTXO fetch when auto-pricing from mempool */
     uint64_t fee_sat    = fee_str ? (uint64_t)strtoull(fee_str, NULL, 10) : 0;
 
-    if (amount_sat == 0) {
+    if (!send_max && amount_sat == 0) {
         fprintf(stderr, "error: invalid amount\n");
         return 1;
     }
@@ -530,6 +531,13 @@ static int cmd_send(const char *dest_addr, const char *amount_str, const char *f
         return 1;
     }
 
+    if (strcmp(our_address, dest_addr) == 0) {
+        fprintf(stderr, "error: source and destination address are the same\n");
+        memset(seed, 0, sizeof(seed));
+        memset(privkey, 0, 32);
+        return 1;
+    }
+
     /* Fetch UTXOs */
     tx_utxo_t utxos[64];
     int n_utxos = network_get_utxos(our_address, (utxo_t *)utxos, 64);
@@ -551,11 +559,12 @@ static int cmd_send(const char *dest_addr, const char *amount_str, const char *f
     for (int i = 0; i < n_utxos; i++) total_in += utxos[i].value;
 
     /* Auto-price fee from mempool when none was specified.
-     * vsize estimate: 10 base + 68 per P2WPKH input + 31 per output (2 outputs). */
+     * vsize estimate: 10 base + 68 per P2WPKH input + 31 per output.
+     * 'max' sends to one output only; a normal send has a second change output. */
     if (fee_sat == 0) {
         uint64_t rate = 0;
         if (network_get_fee_rate(&rate) == 0) {
-            uint64_t vsize = 10 + (uint64_t)n_utxos * 68 + 62;
+            uint64_t vsize = 10 + (uint64_t)n_utxos * 68 + (send_max ? 31 : 62);
             fee_sat = rate * vsize;
             printf("Recommended fee rate: %llu sat/vbyte (~%llu vbytes)\n",
                    (unsigned long long)rate, (unsigned long long)vsize);
@@ -563,6 +572,17 @@ static int cmd_send(const char *dest_addr, const char *amount_str, const char *f
             fee_sat = 1000;
             printf("Recommended fee rate: could not fetch from mempool, using 1000 sat fallback\n");
         }
+    }
+
+    if (send_max) {
+        if (total_in <= fee_sat) {
+            fprintf(stderr, "error: insufficient funds to cover fee (%llu sat available, %llu fee)\n",
+                    (unsigned long long)total_in, (unsigned long long)fee_sat);
+            memset(seed, 0, sizeof(seed));
+            memset(privkey, 0, 32);
+            return 1;
+        }
+        amount_sat = total_in - fee_sat;
     }
 
     if (total_in < amount_sat + fee_sat) {
@@ -575,8 +595,8 @@ static int cmd_send(const char *dest_addr, const char *amount_str, const char *f
         return 1;
     }
 
-    uint64_t change_sat = total_in - amount_sat - fee_sat;
-    if (change_sat < DUST_LIMIT) {
+    uint64_t change_sat = send_max ? 0 : total_in - amount_sat - fee_sat;
+    if (!send_max && change_sat < DUST_LIMIT) {
         fee_sat += change_sat;
         change_sat = 0;
     }
