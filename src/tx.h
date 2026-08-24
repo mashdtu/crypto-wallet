@@ -4,10 +4,11 @@
 #include <stdint.h>
 #include <stddef.h>
 
-typedef struct {
-    char     txid_hex[65]; /* hex string, as returned by mempool.space */
+typedef struct
+{
+    char txid_hex[65]; /* hex string, as returned by mempool.space */
     uint32_t vout;
-    uint64_t value;        /* satoshis */
+    uint64_t value; /* satoshis */
 } tx_utxo_t;
 
 /*

@@ -28,13 +28,13 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 
-#define SALT_LEN   32       /* salt for PBKDF2 */
-#define IV_LEN     12       /* GCM nonce - 96 bits is the recommended size */
-#define SEED_LEN   64       /* BIP-32 seed */
-#define TAG_LEN    16       /* GCM authentication tag */
-#define KEY_LEN    32       /* AES-256 key */
-#define ITER       100000   /* PBKDF2 iterations - ~1 second on modern hardware */
-#define FILE_SIZE  (SALT_LEN + IV_LEN + SEED_LEN + TAG_LEN)     /* 124 bytes */
+#define SALT_LEN 32                                        /* salt for PBKDF2 */
+#define IV_LEN 12                                          /* GCM nonce - 96 bits is the recommended size */
+#define SEED_LEN 64                                        /* BIP-32 seed */
+#define TAG_LEN 16                                         /* GCM authentication tag */
+#define KEY_LEN 32                                         /* AES-256 key */
+#define ITER 100000                                        /* PBKDF2 iterations - ~1 second on modern hardware */
+#define FILE_SIZE (SALT_LEN + IV_LEN + SEED_LEN + TAG_LEN) /* 124 bytes */
 
 /*
  * derive_key()
@@ -51,9 +51,9 @@ static int derive_key(const char *password,
                       unsigned char *key_out)
 {
     int rc = PKCS5_PBKDF2_HMAC(password, (int)strlen(password),
-                                salt, SALT_LEN,
-                                ITER, EVP_sha512(),
-                                KEY_LEN, key_out);
+                               salt, SALT_LEN,
+                               ITER, EVP_sha512(),
+                               KEY_LEN, key_out);
     return rc == 1 ? 0 : -1;
 }
 
@@ -70,13 +70,17 @@ int storage_encrypt(const unsigned char *seed,
     /* Generate fresh random salt and IV for this encryption.
      * Using a new random salt every time means we also get a new AES key
      * even if the password hasn't changed. */
-    if (RAND_bytes(salt, SALT_LEN) != 1) return -1;
-    if (RAND_bytes(iv,   IV_LEN)   != 1) return -1;
+    if (RAND_bytes(salt, SALT_LEN) != 1)
+        return -1;
+    if (RAND_bytes(iv, IV_LEN) != 1)
+        return -1;
 
-    if (derive_key(password, salt, key) != 0) return -1;
+    if (derive_key(password, salt, key) != 0)
+        return -1;
 
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) return -1;
+    if (!ctx)
+        return -1;
 
     int ok = 1;
     int out_len = 0;
@@ -94,18 +98,20 @@ int storage_encrypt(const unsigned char *seed,
     /* Wipe the key from the stack immediately after use */
     memset(key, 0, KEY_LEN);
 
-    if (!ok) return -1;
+    if (!ok)
+        return -1;
 
     /* Write all four fields in order to the device/file.
      * fopen("wb") on a raw block device works fine on Linux. */
     FILE *f = fopen(path, "wb");
-    if (!f) return -1;
+    if (!f)
+        return -1;
 
     int wrote =
-        (fwrite(salt,       1, SALT_LEN, f) == SALT_LEN) &&
-        (fwrite(iv,         1, IV_LEN,   f) == IV_LEN)   &&
+        (fwrite(salt, 1, SALT_LEN, f) == SALT_LEN) &&
+        (fwrite(iv, 1, IV_LEN, f) == IV_LEN) &&
         (fwrite(ciphertext, 1, SEED_LEN, f) == SEED_LEN) &&
-        (fwrite(tag,        1, TAG_LEN,  f) == TAG_LEN);
+        (fwrite(tag, 1, TAG_LEN, f) == TAG_LEN);
 
     fclose(f);
     return wrote ? 0 : -1;
@@ -119,23 +125,30 @@ int storage_decrypt(const char *path,
 
     /* Read exactly 124 bytes from offset 0 */
     FILE *f = fopen(path, "rb");
-    if (!f) return -1;
+    if (!f)
+        return -1;
 
     int read_ok = (fread(buf, 1, FILE_SIZE, f) == FILE_SIZE);
     fclose(f);
-    if (!read_ok) return -1;
+    if (!read_ok)
+        return -1;
 
     /* Split the buffer into its four fields */
-    unsigned char *salt       = buf;
-    unsigned char *iv         = buf + SALT_LEN;
+    unsigned char *salt = buf;
+    unsigned char *iv = buf + SALT_LEN;
     unsigned char *ciphertext = buf + SALT_LEN + IV_LEN;
-    unsigned char *tag        = buf + SALT_LEN + IV_LEN + SEED_LEN;
+    unsigned char *tag = buf + SALT_LEN + IV_LEN + SEED_LEN;
 
     unsigned char key[KEY_LEN];
-    if (derive_key(password, salt, key) != 0) return -1;
+    if (derive_key(password, salt, key) != 0)
+        return -1;
 
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) { memset(key, 0, KEY_LEN); return -1; }
+    if (!ctx)
+    {
+        memset(key, 0, KEY_LEN);
+        return -1;
+    }
 
     int ok = 1;
     int out_len = 0;
@@ -151,7 +164,8 @@ int storage_decrypt(const char *path,
     EVP_CIPHER_CTX_free(ctx);
     memset(key, 0, KEY_LEN);
 
-    if (!ok) {
+    if (!ok)
+    {
         /* Authentication failed: wrong password or corrupted data.
          * Zero the output so we never hand back partial plaintext. */
         memset(seed_out, 0, SEED_LEN);

@@ -22,7 +22,7 @@
 #include <string.h>
 #include <curl/curl.h>
 
-#define API_BASE     "https://mempool.space/api"
+#define API_BASE "https://mempool.space/api"
 #define TIMEOUT_SECS 10L
 
 /* HTTP helpers */
@@ -30,8 +30,9 @@
 /* A growable buffer that curl writes response data into.
  * We realloc on every chunk which is slightly inefficient but fine
  * for the small responses we are dealing with (a few KB at most). */
-typedef struct {
-    char  *data;
+typedef struct
+{
+    char *data;
     size_t len;
 } buf_t;
 
@@ -42,11 +43,12 @@ static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata)
     size_t bytes = size * nmemb;
     buf_t *b = (buf_t *)userdata;
     char *tmp = realloc(b->data, b->len + bytes + 1);
-    if (!tmp) return 0;         /* returning 0 tells curl to abort */
+    if (!tmp)
+        return 0; /* returning 0 tells curl to abort */
     b->data = tmp;
     memcpy(b->data + b->len, ptr, bytes);
     b->len += bytes;
-    b->data[b->len] = '\0';     /* keep it null-terminated for strstr/etc */
+    b->data[b->len] = '\0'; /* keep it null-terminated for strstr/etc */
     return bytes;
 }
 
@@ -60,11 +62,16 @@ static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata)
 static int http_get(const char *url, buf_t *out)
 {
     CURL *curl = curl_easy_init();
-    if (!curl) return -1;
+    if (!curl)
+        return -1;
 
     out->data = malloc(1);
-    out->len  = 0;
-    if (!out->data) { curl_easy_cleanup(curl); return -1; }
+    out->len = 0;
+    if (!out->data)
+    {
+        curl_easy_cleanup(curl);
+        return -1;
+    }
     out->data[0] = '\0';
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
@@ -82,7 +89,8 @@ static int http_get(const char *url, buf_t *out)
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     curl_easy_cleanup(curl);
 
-    if (res != CURLE_OK || http_code != 200) {
+    if (res != CURLE_OK || http_code != 200)
+    {
         free(out->data);
         out->data = NULL;
         return -1;
@@ -108,9 +116,11 @@ static int64_t json_get_int(const char *json, const char *key)
     char pat[128];
     snprintf(pat, sizeof(pat), "\"%s\":", key);
     const char *p = strstr(json, pat);
-    if (!p) return -1;
+    if (!p)
+        return -1;
     p += strlen(pat);
-    while (*p == ' ') p++;
+    while (*p == ' ')
+        p++;
     return (int64_t)strtoll(p, NULL, 10);
 }
 
@@ -133,16 +143,20 @@ int network_get_utxos(const char *address, utxo_t *utxos, int max_utxos)
     snprintf(url, sizeof(url), "%s/address/%s/utxo", API_BASE, address);
 
     buf_t resp = {0};
-    if (http_get(url, &resp) != 0) return -1;
+    if (http_get(url, &resp) != 0)
+        return -1;
 
     int count = 0;
     const char *p = resp.data;
-    while (count < max_utxos && (p = strstr(p, "\"txid\"")) != NULL) {
+    while (count < max_utxos && (p = strstr(p, "\"txid\"")) != NULL)
+    {
         /* Extract the 64-character hex txid string */
         const char *q = strchr(p, ':');
-        if (!q) break;
+        if (!q)
+            break;
         q++;
-        while (*q == ' ' || *q == '"') q++;
+        while (*q == ' ' || *q == '"')
+            q++;
         int i = 0;
         while (*q && *q != '"' && i < 64)
             utxos[count].txid[i++] = *q++;
@@ -150,16 +164,20 @@ int network_get_utxos(const char *address, utxo_t *utxos, int max_utxos)
 
         /* Extract vout (output index within the funding transaction) */
         const char *vout_p = strstr(p, "\"vout\"");
-        if (!vout_p) break;
+        if (!vout_p)
+            break;
         vout_p = strchr(vout_p, ':');
-        if (!vout_p) break;
+        if (!vout_p)
+            break;
         utxos[count].vout = (uint32_t)strtoul(vout_p + 1, NULL, 10);
 
         /* Extract value in satoshis */
         const char *val_p = strstr(p, "\"value\"");
-        if (!val_p) break;
+        if (!val_p)
+            break;
         val_p = strchr(val_p, ':');
-        if (!val_p) break;
+        if (!val_p)
+            break;
         utxos[count].value = (uint64_t)strtoull(val_p + 1, NULL, 10);
 
         count++;
@@ -188,24 +206,27 @@ int64_t network_get_balance(const char *address)
     snprintf(url, sizeof(url), "%s/address/%s", API_BASE, address);
 
     buf_t resp = {0};
-    if (http_get(url, &resp) != 0) return -1;
+    if (http_get(url, &resp) != 0)
+        return -1;
 
-    int64_t funded   = json_get_int(resp.data, "funded_txo_sum");
-    int64_t spent    = json_get_int(resp.data, "spent_txo_sum");
-    int64_t unc_in   = json_get_int(resp.data, "unconfirmed_tx_count");
-    (void)unc_in;       /* not used directly, but tells us there's a mempool section */
+    int64_t funded = json_get_int(resp.data, "funded_txo_sum");
+    int64_t spent = json_get_int(resp.data, "spent_txo_sum");
+    int64_t unc_in = json_get_int(resp.data, "unconfirmed_tx_count");
+    (void)unc_in; /* not used directly, but tells us there's a mempool section */
 
     /* The mempool_stats block has its own funded/spent sums for unconfirmed txs */
     const char *mp = strstr(resp.data, "mempool_stats");
     int64_t mp_funded = 0, mp_spent = 0;
-    if (mp) {
+    if (mp)
+    {
         mp_funded = json_get_int(mp, "funded_txo_sum");
-        mp_spent  = json_get_int(mp, "spent_txo_sum");
+        mp_spent = json_get_int(mp, "spent_txo_sum");
     }
 
     free(resp.data);
 
-    if (funded < 0 || spent < 0) return -1;
+    if (funded < 0 || spent < 0)
+        return -1;
     return (funded - spent) + (mp_funded - mp_spent);
 }
 
@@ -222,15 +243,20 @@ int network_broadcast(const char *tx_hex, char *txid_out)
     snprintf(url, sizeof(url), "%s/tx", API_BASE);
 
     CURL *curl = curl_easy_init();
-    if (!curl) return -1;
+    if (!curl)
+        return -1;
 
     buf_t resp = {0};
     resp.data = malloc(1);
-    if (!resp.data) { curl_easy_cleanup(curl); return -1; }
+    if (!resp.data)
+    {
+        curl_easy_cleanup(curl);
+        return -1;
+    }
     resp.data[0] = '\0';
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, tx_hex);     /* POST body = raw tx hex */
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, tx_hex); /* POST body = raw tx hex */
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, TIMEOUT_SECS);
@@ -243,7 +269,8 @@ int network_broadcast(const char *tx_hex, char *txid_out)
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     curl_easy_cleanup(curl);
 
-    if (res != CURLE_OK || http_code != 200) {
+    if (res != CURLE_OK || http_code != 200)
+    {
         fprintf(stderr, "broadcast error (HTTP %ld): %s\n",
                 http_code, resp.data ? resp.data : "");
         free(resp.data);
@@ -253,7 +280,8 @@ int network_broadcast(const char *tx_hex, char *txid_out)
     /* Response body is the 64-character txid */
     if (txid_out && resp.data)
         strncpy(txid_out, resp.data, 64);
-    if (txid_out) txid_out[64] = '\0';
+    if (txid_out)
+        txid_out[64] = '\0';
 
     free(resp.data);
     return 0;
@@ -269,10 +297,12 @@ int network_broadcast(const char *tx_hex, char *txid_out)
 int network_get_fee_rate(uint64_t *rate_out)
 {
     buf_t resp = {0};
-    if (http_get(API_BASE "/v1/fees/recommended", &resp) != 0) return -1;
+    if (http_get(API_BASE "/v1/fees/recommended", &resp) != 0)
+        return -1;
     int64_t val = json_get_int(resp.data, "halfHourFee");
     free(resp.data);
-    if (val <= 0) return -1;
+    if (val <= 0)
+        return -1;
     *rate_out = (uint64_t)val;
     return 0;
 }
@@ -286,10 +316,12 @@ int network_get_fee_rate(uint64_t *rate_out)
 int network_get_btc_price(const char *currency, double *price_out)
 {
     buf_t resp = {0};
-    if (http_get("https://mempool.space/api/v1/prices", &resp) != 0) return -1;
+    if (http_get("https://mempool.space/api/v1/prices", &resp) != 0)
+        return -1;
     int64_t val = json_get_int(resp.data, currency);
     free(resp.data);
-    if (val <= 0) return -1;
+    if (val <= 0)
+        return -1;
     *price_out = (double)val;
     return 0;
 }
@@ -316,26 +348,33 @@ static int64_t tx_net_for_addr(const char *json, const char *end, const char *ad
     snprintf(pat, sizeof(pat), "\"scriptpubkey_address\":\"%s\"", addr);
     size_t plen = strlen(pat);
     const char *p = json;
-    while ((p = strstr(p, pat)) != NULL && p < end) {
+    while ((p = strstr(p, pat)) != NULL && p < end)
+    {
         /* Walk back to the opening { of the enclosing object */
         const char *brace = p;
-        while (brace > json && *brace != '{') brace--;
+        while (brace > json && *brace != '{')
+            brace--;
 
         /* Check if that { is preceded by "prevout": (with optional whitespace).
          * If it is, this address appears in a vin.prevout, i.e. it's being spent. */
         const char *pre = brace > json ? brace - 1 : json;
-        while (pre > json && (*pre == ' ' || *pre == '\t' || *pre == '\n' || *pre == '\r')) pre--;
+        while (pre > json && (*pre == ' ' || *pre == '\t' || *pre == '\n' || *pre == '\r'))
+            pre--;
         int in_prevout = (*pre == ':' && pre >= json + 9 &&
                           strncmp(pre - 9, "\"prevout\"", 9) == 0);
 
         /* Find the "value": field that belongs to this same object */
         const char *vp = strstr(p + plen, "\"value\":");
-        if (vp && vp < end) {
+        if (vp && vp < end)
+        {
             const char *vs = vp + 8;
-            while (*vs == ' ') vs++;
+            while (*vs == ' ')
+                vs++;
             int64_t val = (int64_t)strtoll(vs, NULL, 10);
-            if (in_prevout) net -= val;     /* being spent      (outflow) */
-            else            net += val;     /* being received   (inflow) */
+            if (in_prevout)
+                net -= val; /* being spent      (outflow) */
+            else
+                net += val; /* being received   (inflow) */
         }
         p += plen;
     }
@@ -361,73 +400,102 @@ int network_get_address_txs(const char *address, addr_tx_t *txs, int max_txs)
     char url[256];
     snprintf(url, sizeof(url), "%s/address/%s/txs", API_BASE, address);
     buf_t resp = {0};
-    if (http_get(url, &resp) != 0) return -1;
-    if (!resp.data || resp.len == 0) { free(resp.data); return 0; }
+    if (http_get(url, &resp) != 0)
+        return -1;
+    if (!resp.data || resp.len == 0)
+    {
+        free(resp.data);
+        return 0;
+    }
 
     int count = 0;
     const char *p = resp.data;
 
-    while (count < max_txs) {
+    while (count < max_txs)
+    {
         /* Look for the next "txid":"<64-char hex>" */
         const char *txid_key = strstr(p, "\"txid\":\"");
-        if (!txid_key) break;
+        if (!txid_key)
+            break;
 
         const char *txid_val = txid_key + 8;
 
         /* Extract the 64-character txid */
         char txid[65] = {0};
         int i = 0;
-        while (txid_val[i] && txid_val[i] != '"' && i < 64) {
+        while (txid_val[i] && txid_val[i] != '"' && i < 64)
+        {
             txid[i] = txid_val[i];
             i++;
         }
-        if (i != 64) { p = txid_key + 1; continue; }
+        if (i != 64)
+        {
+            p = txid_key + 1;
+            continue;
+        }
 
         /* Confirm this is a top-level tx: immediately after closing " must be ,"version": */
         const char *after = txid_val + 64 + 1;
-        if (*after != ',' || strncmp(after + 1, "\"version\":", 10) != 0) {
+        if (*after != ',' || strncmp(after + 1, "\"version\":", 10) != 0)
+        {
             p = txid_key + 1;
             continue;
         }
 
         /* Find the opening brace of this tx object */
         const char *tx_start = txid_key;
-        while (tx_start > resp.data && *tx_start != '{') tx_start--;
+        while (tx_start > resp.data && *tx_start != '{')
+            tx_start--;
 
         /* Find "status":{ and walk its depth to find where the tx ends.
          * "status" is always the last field, so its closing } is also the
          * closing } of the entire tx object. */
         const char *status_p = strstr(txid_key, "\"status\":{");
-        if (!status_p) { p = txid_key + 1; continue; }
+        if (!status_p)
+        {
+            p = txid_key + 1;
+            continue;
+        }
 
         const char *sp = status_p + 9; /* points to opening { */
         int depth = 1;
-        while (*sp && depth > 0) {
-            if      (*sp == '{') depth++;
-            else if (*sp == '}') depth--;
+        while (*sp && depth > 0)
+        {
+            if (*sp == '{')
+                depth++;
+            else if (*sp == '}')
+                depth--;
             sp++;
         }
         /* sp is now one past the closing } of status, which closes the tx object */
         const char *tx_end = sp;
-        if (!tx_end || tx_end <= tx_start) { p = txid_key + 1; continue; }
+        if (!tx_end || tx_end <= tx_start)
+        {
+            p = txid_key + 1;
+            continue;
+        }
 
         /* Parse confirmed flag and block_time from the status block */
         int confirmed = 0;
         uint32_t block_time = 0;
         const char *conf_p = strstr(status_p, "\"confirmed\":");
-        if (conf_p && conf_p < tx_end) {
+        if (conf_p && conf_p < tx_end)
+        {
             const char *cv = conf_p + 12;
-            while (*cv == ' ') cv++;
+            while (*cv == ' ')
+                cv++;
             confirmed = (strncmp(cv, "true", 4) == 0);
         }
-        if (confirmed) {
+        if (confirmed)
+        {
             int64_t bt = json_get_int(status_p, "block_time");
-            if (bt > 0) block_time = (uint32_t)bt;
+            if (bt > 0)
+                block_time = (uint32_t)bt;
         }
 
-        txs[count].net_value  = tx_net_for_addr(tx_start, tx_end, address);
+        txs[count].net_value = tx_net_for_addr(tx_start, tx_end, address);
         txs[count].block_time = block_time;
-        txs[count].confirmed  = confirmed;
+        txs[count].confirmed = confirmed;
         strncpy(txs[count].txid, txid, 64);
         txs[count].txid[64] = '\0';
         count++;

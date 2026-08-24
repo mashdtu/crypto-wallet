@@ -10,10 +10,11 @@
  * No key material ever enters this module.
  */
 
-typedef struct {
+typedef struct
+{
     char txid[65];
     uint32_t vout;
-    uint64_t value;  /* satoshis */
+    uint64_t value; /* satoshis */
 } utxo_t;
 
 /*
@@ -67,7 +68,8 @@ int network_get_btc_price(const char *currency, double *price_out);
  *
  * Returns number of transactions found (>= 0), or -1 on error.
  */
-typedef struct {
+typedef struct
+{
     char txid[65];
     int64_t net_value;
     uint32_t block_time;

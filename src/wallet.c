@@ -63,8 +63,8 @@ static int derive_hardened_child(
     memcpy(data + 1, parent_key, 32);
     data[33] = (unsigned char)((index >> 24) & 0xFFu);
     data[34] = (unsigned char)((index >> 16) & 0xFFu);
-    data[35] = (unsigned char)((index >>  8) & 0xFFu);
-    data[36] = (unsigned char)((index      ) & 0xFFu);
+    data[35] = (unsigned char)((index >> 8) & 0xFFu);
+    data[36] = (unsigned char)((index) & 0xFFu);
 
     unsigned char out[64];
     unsigned int out_len;
@@ -72,8 +72,8 @@ static int derive_hardened_child(
         return -1;
 
     unsigned char IL[32];
-    memcpy(IL, out, 32);                /* left half: tweak to add to parent key */
-    memcpy(child_cc, out + 32, 32);     /* right half: new chain code */
+    memcpy(IL, out, 32);            /* left half: tweak to add to parent key */
+    memcpy(child_cc, out + 32, 32); /* right half: new chain code */
 
     /* child_key = parent_key + IL (mod curve order), done in-place by secp256k1 */
     memcpy(child_key, parent_key, 32);
@@ -106,7 +106,8 @@ static int derive_normal_child(
 
     /* Compute the parent compressed public key (33 bytes) */
     secp256k1_pubkey pubkey;
-    if (secp256k1_ec_pubkey_create(ctx, &pubkey, parent_key) != 1) {
+    if (secp256k1_ec_pubkey_create(ctx, &pubkey, parent_key) != 1)
+    {
         secp256k1_context_destroy(ctx);
         return -1;
     }
@@ -120,12 +121,13 @@ static int derive_normal_child(
     memcpy(data, pub, 33);
     data[33] = (unsigned char)((index >> 24) & 0xFFu);
     data[34] = (unsigned char)((index >> 16) & 0xFFu);
-    data[35] = (unsigned char)((index >>  8) & 0xFFu);
-    data[36] = (unsigned char)((index      ) & 0xFFu);
+    data[35] = (unsigned char)((index >> 8) & 0xFFu);
+    data[36] = (unsigned char)((index) & 0xFFu);
 
     unsigned char out[64];
     unsigned int out_len;
-    if (HMAC(EVP_sha512(), parent_cc, 32, data, 37, out, &out_len) == NULL) {
+    if (HMAC(EVP_sha512(), parent_cc, 32, data, 37, out, &out_len) == NULL)
+    {
         secp256k1_context_destroy(ctx);
         return -1;
     }
@@ -159,22 +161,28 @@ int wallet_derive_address(const unsigned char *seed,
         return -1;
 
     unsigned char k[32], cc[32];
-    memcpy(k,  out,      32);
+    memcpy(k, out, 32);
     memcpy(cc, out + 32, 32);
 
     /* Walk the derivation path m/84'/0'/0'/0/<index>.
      * Each call overwrites k and cc with the child key and chain code.
      * The 0x80000000 bit marks a step as hardened. */
-    if (derive_hardened_child(k, cc, 84u | 0x80000000u, k, cc) != 0) return -1; /* purpose */
-    if (derive_hardened_child(k, cc,  0u | 0x80000000u, k, cc) != 0) return -1; /* coin: BTC mainnet */
-    if (derive_hardened_child(k, cc,  0u | 0x80000000u, k, cc) != 0) return -1; /* account 0 */
-    if (derive_normal_child(k, cc, 0u,    k, cc) != 0) return -1;               /* external chain */
-    if (derive_normal_child(k, cc, index, k, cc) != 0) return -1;               /* address index */
+    if (derive_hardened_child(k, cc, 84u | 0x80000000u, k, cc) != 0)
+        return -1; /* purpose */
+    if (derive_hardened_child(k, cc, 0u | 0x80000000u, k, cc) != 0)
+        return -1; /* coin: BTC mainnet */
+    if (derive_hardened_child(k, cc, 0u | 0x80000000u, k, cc) != 0)
+        return -1; /* account 0 */
+    if (derive_normal_child(k, cc, 0u, k, cc) != 0)
+        return -1; /* external chain */
+    if (derive_normal_child(k, cc, index, k, cc) != 0)
+        return -1; /* address index */
 
     /* Compute the compressed public key from the derived private key */
     secp256k1_context *ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN);
     secp256k1_pubkey pubkey;
-    if (secp256k1_ec_pubkey_create(ctx, &pubkey, k) != 1) {
+    if (secp256k1_ec_pubkey_create(ctx, &pubkey, k) != 1)
+    {
         secp256k1_context_destroy(ctx);
         return -1;
     }
@@ -215,20 +223,26 @@ int wallet_derive_key(const unsigned char *seed,
         return -1;
 
     unsigned char k[32], cc[32];
-    memcpy(k,  out,      32);
+    memcpy(k, out, 32);
     memcpy(cc, out + 32, 32);
 
-    if (derive_hardened_child(k, cc, 84u | 0x80000000u, k, cc) != 0) return -1;
-    if (derive_hardened_child(k, cc,  0u | 0x80000000u, k, cc) != 0) return -1;
-    if (derive_hardened_child(k, cc,  0u | 0x80000000u, k, cc) != 0) return -1;
-    if (derive_normal_child(k, cc, 0u,    k, cc) != 0) return -1;
-    if (derive_normal_child(k, cc, index, k, cc) != 0) return -1;
+    if (derive_hardened_child(k, cc, 84u | 0x80000000u, k, cc) != 0)
+        return -1;
+    if (derive_hardened_child(k, cc, 0u | 0x80000000u, k, cc) != 0)
+        return -1;
+    if (derive_hardened_child(k, cc, 0u | 0x80000000u, k, cc) != 0)
+        return -1;
+    if (derive_normal_child(k, cc, 0u, k, cc) != 0)
+        return -1;
+    if (derive_normal_child(k, cc, index, k, cc) != 0)
+        return -1;
 
     memcpy(privkey_out, k, 32);
 
     secp256k1_context *ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN);
     secp256k1_pubkey pubkey;
-    if (secp256k1_ec_pubkey_create(ctx, &pubkey, k) != 1) {
+    if (secp256k1_ec_pubkey_create(ctx, &pubkey, k) != 1)
+    {
         secp256k1_context_destroy(ctx);
         return -1;
     }
