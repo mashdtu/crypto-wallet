@@ -4,6 +4,8 @@ DISCLAIMER: THIS PROJECT IS NOT GUARANTEED SAFE AND IS THEREFORE NOT APPLICABLE 
 
 A self-custody Bitcoin mainnet wallet written in C. The private key never touches your hard drive, it lives encrypted on a USB drive and is decrypted in memory only while a command is running, then wiped immediately.
 
+This code can be ran on a personal device, however for maximum security it is intended to be altered to run on an offline device, which is only to be used only for the purpose of signing transactions. As the code is currently, it is not fit to run on such a device, though feel free to fork this repository and adapt it yourself.
+
 ## What it does
 
 - Generates a 24-word BIP-39 mnemonic and derives a Bitcoin mainnet wallet from it.
