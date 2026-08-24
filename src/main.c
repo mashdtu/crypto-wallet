@@ -458,22 +458,23 @@ static int cmd_balance(uint32_t gap_limit)
  *
  * Builds, signs, and broadcasts a Bitcoin transaction.
  *
- * Currently uses only index 0 for spending (all UTXOs from that address).
+ * Spends all UTXOs from the address at from_index (default 0).
  * The destination can be any valid mainnet segwit address (P2WPKH or P2TR).
  *
  * Flow:
  *   1. Decode destination address to get the witness program.
- *   2. Decrypt seed, derive key at index 0.
+ *   2. Decrypt seed, derive key at from_index.
  *   3. Fetch UTXOs from mempool.space.
  *   4. Check if destination is ours (to label it in the confirmation screen).
  *   5. Show a confirmation summary with amounts and fiat values.
  *   6. Build and sign the transaction (BIP-143 sighash + ECDSA).
  *   7. Broadcast the signed hex to mempool.space.
  *
- * Change is returned to index 0 if > dust limit (546 sat).
+ * Change is returned to from_index if > dust limit (546 sat).
  * If change would be below dust, it's folded into the fee instead.
  */
-static int cmd_send(const char *dest_addr, const char *amount_str, const char *fee_str)
+static int cmd_send(const char *dest_addr, const char *amount_str, const char *fee_str,
+                    uint32_t from_index)
 {
     uint64_t amount_sat = (uint64_t)strtoull(amount_str, NULL, 10);
     /* fee_sat is computed after UTXO fetch when auto-pricing from mempool */
@@ -513,9 +514,8 @@ static int cmd_send(const char *dest_addr, const char *amount_str, const char *f
         return 1;
     }
 
-    /* Derive key at index 0 */
     unsigned char privkey[32], pubkey[33], our_hash160[20];
-    if (wallet_derive_key(seed, 0, privkey, pubkey, our_hash160) != 0) {
+    if (wallet_derive_key(seed, from_index, privkey, pubkey, our_hash160) != 0) {
         fprintf(stderr, "error: key derivation failed\n");
         memset(seed, 0, sizeof(seed));
         return 1;
@@ -641,8 +641,8 @@ static int cmd_send(const char *dest_addr, const char *amount_str, const char *f
 
     printf("Sending:  %s sat%s\n", s_send, suf_send);
     printf("Fee:      %s sat%s\n\n", s_fee, suf_fee);
-    printf("From:     %s  (yours, index 0)\n          %s sat%s -> %s sat%s\n\n",
-           our_address, s_fromb, suf_fromb, s_froma, suf_froma);
+    printf("From:     %s  (yours, index %u)\n          %s sat%s -> %s sat%s\n\n",
+           our_address, from_index, s_fromb, suf_fromb, s_froma, suf_froma);
     if (dest_idx >= 0)
         printf("To:       %s  (yours, index %d)\n          %s sat%s -> %s sat%s\n",
                dest_addr, dest_idx, s_tob, suf_tob, s_toa, suf_toa);
@@ -1352,11 +1352,22 @@ int main(int argc, char *argv[])
 
     if (strcmp(argv[argi], "send") == 0) {
         if (argc <= argi + 2) {
-            fprintf(stderr, "Usage: %s send <address> <satoshis> [fee_sat]\n", argv[0]);
+            fprintf(stderr, "Usage: %s send [--from <index>] <address> <satoshis> [fee_sat]\n", argv[0]);
             return 1;
         }
-        return cmd_send(argv[argi + 1], argv[argi + 2],
-                        argc > argi + 3 ? argv[argi + 3] : NULL);
+        uint32_t from_index = 0;
+        int send_argi = argi + 1;
+        if (argc > send_argi + 1 && strcmp(argv[send_argi], "--from") == 0) {
+            from_index = (uint32_t)strtoul(argv[send_argi + 1], NULL, 10);
+            send_argi += 2;
+        }
+        if (argc <= send_argi + 1) {
+            fprintf(stderr, "Usage: %s send [--from <index>] <address> <satoshis> [fee_sat]\n", argv[0]);
+            return 1;
+        }
+        return cmd_send(argv[send_argi], argv[send_argi + 1],
+                        argc > send_argi + 2 ? argv[send_argi + 2] : NULL,
+                        from_index);
     }
 
     if (strcmp(argv[argi], "check") == 0) {
