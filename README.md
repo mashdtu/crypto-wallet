@@ -17,11 +17,11 @@ This code can be ran on a personal device, however for maximum security it is in
 
 ## Security model
 
-| What is stored on USB | What stays in memory only |
-|---|---|
-| 124-byte encrypted blob | 64-byte seed |
-| Random salt + IV | 32-byte private key |
-| AES-256-GCM ciphertext + tag | Derived addresses |
+| What is stored on USB        | What stays in memory only |
+| ---------------------------- | ------------------------- |
+| 124-byte encrypted blob      | 64-byte seed              |
+| Random salt + IV             | 32-byte private key       |
+| AES-256-GCM ciphertext + tag | Derived addresses         |
 
 The encryption key is never written anywhere, it's derived fresh every time from your password + the random salt via PBKDF2-HMAC-SHA512 (100,000 rounds).
 
@@ -42,16 +42,19 @@ If someone steals your USB, they have an encrypted blob. Without your password t
 First install the dependencies for your distro:
 
 **Debian / Ubuntu:**
+
 ```bash
 sudo apt install gcc libssl-dev libsecp256k1-dev libcurl4-openssl-dev pkg-config udisks2 util-linux
 ```
 
 **Fedora / RHEL:**
+
 ```bash
 sudo dnf install gcc openssl-devel libsecp256k1-devel libcurl-devel pkg-config udisks2 util-linux
 ```
 
 **Arch:**
+
 ```bash
 sudo pacman -S gcc openssl libsecp256k1 curl pkg-config udisks2 util-linux
 ```
@@ -101,8 +104,8 @@ sudo wallet init
 sudo wallet restore
 ```
 
-Enter your 24 words one at a time.  Each word is validated against the BIP-39
-wordlist as you type.  Shows the first address at the end so you can verify
+Enter your 24 words one at a time. Each word is validated against the BIP-39
+wordlist as you type. Shows the first address at the end so you can verify
 the wallet was restored correctly before setting a password.
 
 ## Commands
@@ -168,7 +171,7 @@ sudo wallet usb-clone
 6. Asks for confirmation before writing
 7. Writes the same 124-byte encrypted blob to the new USB
 
-The clone contains the exact same encrypted data.  Both USB drives use the
+The clone contains the exact same encrypted data. Both USB drives use the
 same password to decrypt.
 
 ### Ejecting
@@ -186,7 +189,7 @@ Safe to physically unplug after this.
 wallet settings
 ```
 
-Supported: USD, EUR, GBP, CAD, CHF, AUD, JPY.  Set to "None" to disable fiat display.
+Supported: USD, EUR, GBP, CAD, CHF, AUD, JPY. Set to "None" to disable fiat display.
 
 The currency preference is saved to `~/.config/btc-wallet/currency`.
 
